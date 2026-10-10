@@ -1,4 +1,4 @@
-from backend.mining import detect_unusual_spending
+from mining import detect_unusual_spending
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
