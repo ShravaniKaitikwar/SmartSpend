@@ -3,7 +3,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sqlalchemy import text
 
-from backend.database import engine
+from database import engine
 
 
 def detect_unusual_spending():

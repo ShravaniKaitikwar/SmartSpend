@@ -1,30 +1,36 @@
-from mining import detect_unusual_spending
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from backend.database import engine
+from database import engine
+from mining import detect_unusual_spending
 
 app = FastAPI(
     title="SmartSpend API",
-    description="Personal spending analytics and data mining API",
+    description="Personal Expense Analytics Dashboard API",
     version="1.0.0",
 )
+
+# Allow the React frontend to communicate with the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
-    allow_credentials=False,
-    allow_methods=["GET"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 @app.get("/")
 def home():
-    return {"message": "Welcome to SmartSpend!", "status": "running"}
+    return {
+        "message": "Welcome to SmartSpend API",
+        "status": "running",
+    }
 
 
 @app.get("/health")
@@ -38,70 +44,82 @@ def database_health():
         with engine.connect() as connection:
             database_name = connection.execute(
                 text("SELECT current_database()")
-            ).scalar_one()
-        return {"status": "connected", "database": database_name}
-    except Exception:
-        raise HTTPException(status_code=503, detail="Database connection failed")
+            ).scalar()
+
+        return {
+            "status": "connected",
+            "database": database_name,
+        }
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database connection failed: {str(error)}",
+        )
 
 
 @app.get("/api/summary")
-def spending_summary():
+def get_summary():
     query = text("""
         SELECT
-            COUNT(*) AS total_transactions,
+            COUNT(*) AS transaction_count,
             COALESCE(SUM(amount), 0) AS total_spending,
-            COALESCE(AVG(amount), 0) AS average_transaction
+            COALESCE(AVG(amount), 0) AS average_spending
         FROM fact_expenses
     """)
 
     try:
         with engine.connect() as connection:
-            row = connection.execute(query).mappings().one()
+            result = connection.execute(query).mappings().first()
 
         return {
-            "total_transactions": row["total_transactions"],
-            "total_spending": float(row["total_spending"]),
-            "average_transaction": round(float(row["average_transaction"]), 2),
-            "currency": "INR",
+            "transaction_count": result["transaction_count"],
+            "total_spending": float(result["total_spending"]),
+            "average_spending": float(result["average_spending"]),
         }
-    except Exception:
-        raise HTTPException(status_code=503, detail="Could not load spending summary")
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not retrieve summary: {str(error)}",
+        )
 
 
 @app.get("/api/categories")
-def category_spending():
+def get_categories():
     query = text("""
         SELECT
             c.category_name,
-            COUNT(*) AS transactions,
-            SUM(f.amount) AS total_spent
+            COALESCE(SUM(f.amount), 0) AS total_spending
         FROM fact_expenses f
         JOIN dim_category c
-            ON f.category_key = c.category_key
+            ON f.category_id = c.category_id
         GROUP BY c.category_name
-        ORDER BY total_spent DESC
+        ORDER BY total_spending DESC
     """)
 
     try:
         with engine.connect() as connection:
-            rows = connection.execute(query).mappings().all()
+            results = connection.execute(query).mappings().all()
 
         return [
             {
                 "category": row["category_name"],
-                "transactions": row["transactions"],
-                "total_spent": float(row["total_spent"]),
+                "total": float(row["total_spending"]),
             }
-            for row in rows
+            for row in results
         ]
-    except Exception:
-        raise HTTPException(status_code=503, detail="Could not load categories")
-@app.get("/api/mining/anomalies")
-def spending_anomalies():
-    try:
-        return detect_unusual_spending()
-    except Exception as e:
+    except Exception as error:
         raise HTTPException(
             status_code=503,
-            detail=f"Could not analyze spending data: {str(e)}",
+            detail=f"Could not retrieve categories: {str(error)}",
+        )
+
+
+@app.get("/api/mining/anomalies")
+def get_anomalies():
+    try:
+        return detect_unusual_spending()
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not detect unusual spending: {str(error)}",
         )
