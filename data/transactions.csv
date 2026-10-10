@@ -1,0 +1,12 @@
+
+transaction_id,date,category,payment_method,amount,description
+TX101,2026-10-01,Food,UPI,180,Lunch
+TX102,2026-10-02,Travel,Cash,120,Bus fare
+TX103,2026-10-03,Shopping,Debit Card,850,Clothing
+TX104,2026-10-04,Bills,UPI,499,Mobile recharge
+TX105,2026-10-05,Food,UPI,250,Dinner
+TX106,2026-10-06,Entertainment,Credit Card,399,Movie
+TX107,2026-10-07,Travel,UPI,200,Cab fare
+TX108,2026-10-08,Healthcare,Cash,350,Pharmacy
+TX109,2026-10-09,Education,Debit Card,1200,Course fee
+TX110,2026-10-10,Food,Cash,160,Breakfast
