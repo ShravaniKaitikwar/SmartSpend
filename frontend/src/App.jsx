@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const API = "http://127.0.0.1:8000";
+const API_BASE = "https://smartspend-backend-iu60.onrender.com";
 
 function App() {
   const [summary, setSummary] = useState(null);
@@ -16,8 +16,8 @@ function App() {
     async function loadDashboard() {
       try {
         const [summaryResponse, categoryResponse] = await Promise.all([
-          fetch(`${API}/api/summary`),
-          fetch(`${API}/api/categories`),
+          fetch(`${API_BASE}/api/summary`),
+          fetch(`${API_BASE}/api/categories`),
         ]);
 
         if (!summaryResponse.ok || !categoryResponse.ok) {
@@ -30,14 +30,15 @@ function App() {
         setSummary(summaryData);
         setCategories(categoryData);
       } catch (err) {
+        console.error("Dashboard data error:", err);
         setError(
-          "Could not load spending data. Check that your backend is running."
+          "Could not load spending data. Please check your API connection."
         );
       }
 
       try {
         const anomalyResponse = await fetch(
-          `${API}/api/mining/anomalies`
+          `${API_BASE}/api/mining/anomalies`
         );
 
         if (!anomalyResponse.ok) {
@@ -46,9 +47,14 @@ function App() {
 
         const anomalyData = await anomalyResponse.json();
 
-        setAnomalies(anomalyData.unusual_transactions || []);
+        setAnomalies(
+          Array.isArray(anomalyData)
+            ? anomalyData
+            : anomalyData.unusual_transactions || []
+        );
         setAnomalyMessage(anomalyData.message || "");
-      } catch {
+      } catch (err) {
+        console.error("Mining data error:", err);
         setMiningError(
           "Could not load data mining insights. Check the mining API."
         );
@@ -67,7 +73,7 @@ function App() {
 
   const maxSpend = Math.max(
     1,
-    ...categories.map((item) => Number(item.total_spent) || 0)
+    ...categories.map((item) => Number(item.total ?? item.total_spent) || 0)
   );
 
   return (
@@ -83,9 +89,7 @@ function App() {
       <section className="welcome">
         <p className="eyebrow">YOUR MONEY, MADE CLEARER</p>
         <h2>Understand your spending.</h2>
-        <p>
-          Discover where your money goes and make smarter decisions.
-        </p>
+        <p>Discover where your money goes and make smarter decisions.</p>
       </section>
 
       {error && <div className="error">{error}</div>}
@@ -93,25 +97,19 @@ function App() {
       <section className="stats">
         <article className="stat-card">
           <span>Total spending</span>
-          <h3>
-            {summary ? money(summary.total_spending) : "Loading..."}
-          </h3>
+          <h3>{summary ? money(summary.total_spending) : "Loading..."}</h3>
           <p>Across recorded transactions</p>
         </article>
 
         <article className="stat-card">
           <span>Transactions</span>
-          <h3>
-            {summary ? summary.total_transactions : "Loading..."}
-          </h3>
+          <h3>{summary ? summary.transaction_count : "Loading..."}</h3>
           <p>Recorded expenses</p>
         </article>
 
         <article className="stat-card">
           <span>Average expense</span>
-          <h3>
-            {summary ? money(summary.average_transaction) : "Loading..."}
-          </h3>
+          <h3>{summary ? money(summary.average_spending) : "Loading..."}</h3>
           <p>Per transaction</p>
         </article>
       </section>
@@ -120,27 +118,25 @@ function App() {
         <h2>Spending by category</h2>
         <p>Compare how much you spend in each category.</p>
 
-        {categories.map((item) => (
-          <div className="category" key={item.category}>
-            <div className="category-heading">
-              <span>{item.category}</span>
-              <strong>{money(item.total_spent)}</strong>
-            </div>
+        {categories.map((item) => {
+          const total = Number(item.total ?? item.total_spent) || 0;
 
-            <div className="bar-track">
-              <div
-                className="bar-fill"
-                style={{
-                  width: `${
-                    ((Number(item.total_spent) || 0) / maxSpend) * 100
-                  }%`,
-                }}
-              />
-            </div>
+          return (
+            <div className="category" key={item.category}>
+              <div className="category-heading">
+                <span>{item.category}</span>
+                <strong>{money(total)}</strong>
+              </div>
 
-            <small>{item.transactions} transactions</small>
-          </div>
-        ))}
+              <div className="bar-track">
+                <div
+                  className="bar-fill"
+                  style={{ width: `${(total / maxSpend) * 100}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
 
         {categories.length === 0 && !error && (
           <p>No category data available.</p>
@@ -156,26 +152,18 @@ function App() {
 
         {miningError && <div className="error">{miningError}</div>}
 
-        {!miningError && anomalyMessage && (
-          <p>{anomalyMessage}</p>
+        {!miningError && anomalyMessage && <p>{anomalyMessage}</p>}
+
+        {!miningError && !anomalyMessage && anomalies.length === 0 && (
+          <p>No unusual transactions detected.</p>
         )}
 
-        {!miningError &&
-          !anomalyMessage &&
-          anomalies.length === 0 && (
-            <p>No unusual transactions detected.</p>
-          )}
-
-        {anomalies.map((item) => (
-          <div
-            className="category"
-            key={item.transaction_id}
-          >
+        {anomalies.map((item, index) => (
+          <div className="category" key={item.transaction_id ?? index}>
             <div className="category-heading">
               <span>{item.category}</span>
               <strong>{money(item.amount)}</strong>
             </div>
-
             <small>
               Transaction #{item.transaction_id} · {item.date}
             </small>
@@ -183,9 +171,7 @@ function App() {
         ))}
       </section>
 
-      <footer>
-        SmartSpend · Data Warehouse &amp; Data Mining Project
-      </footer>
+      <footer>SmartSpend · Data Warehouse &amp; Data Mining Project</footer>
     </main>
   );
 }
