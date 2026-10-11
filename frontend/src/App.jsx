@@ -31,9 +31,7 @@ function App() {
         setCategories(categoryData);
       } catch (err) {
         console.error("Dashboard data error:", err);
-        setError(
-          "Could not load spending data. Please check your API connection."
-        );
+        setError(`Could not load spending data: ${err.message}`);
       }
 
       try {
