@@ -15,7 +15,7 @@ def detect_unusual_spending():
             f.amount
         FROM fact_expenses f
         JOIN dim_date d ON f.date_key = d.date_key
-        JOIN dim_category c ON f.category_key = c.category_key
+       JOIN dim_category c ON f.category_id = c.category_id
         ORDER BY d.full_date
     """)
 
