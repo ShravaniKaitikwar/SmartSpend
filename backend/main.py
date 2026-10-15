@@ -7,8 +7,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from backend.database import engine
-from backend.olap import roll_up, slice_data, dice_data, pivot_data
+from database import engine
+from olap import roll_up, slice_data, dice_data, pivot_data
 
 app = FastAPI(title="SmartSpend API")
 
