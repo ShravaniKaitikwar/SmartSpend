@@ -1,30 +1,10 @@
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  BarChart,
-  Bar,
-  PieChart,
-  Pie,
-  Cell,
-} from "recharts";
 import "./App.css";
 
 const API_BASE = "https://smartspend-backend-iu60.onrender.com";
 
-const COLORS = [
-  "#2563eb", "#0d9488", "#f59e0b", "#8b5cf6",
-  "#ec4899", "#14b8a6", "#f97316", "#64748b",
-];
-
-const currency = (value) =>
+const money = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
@@ -34,59 +14,30 @@ const currency = (value) =>
 const number = (value) =>
   new Intl.NumberFormat("en-IN").format(Number(value) || 0);
 
-const categoryName = (item) =>
-  item.category_name ?? item.category ?? item.name ?? "Uncategorized";
-
-const categoryAmount = (item) =>
-  Number(
-    item.total_spending ??
-    item.total_amount ??
-    item.amount ??
-    item.total ??
-    0
-  );
-
-function extractRows(response) {
-  if (Array.isArray(response)) return response;
-  if (Array.isArray(response?.data)) return response.data;
-  if (Array.isArray(response?.categories)) return response.categories;
-  if (Array.isArray(response?.unusual_transactions)) {
-    return response.unusual_transactions;
-  }
-  if (Array.isArray(response?.anomalies)) return response.anomalies;
-  return [];
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`);
-  }
-  return response.json();
-}
-
 function App() {
   const [summary, setSummary] = useState(null);
   const [categories, setCategories] = useState([]);
   const [anomalies, setAnomalies] = useState([]);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
-  const [dashboardError, setDashboardError] = useState("");
-
-  const [history, setHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const [olapResults, setOlapResults] = useState([]);
   const [olapOperation, setOlapOperation] = useState("");
   const [olapLoading, setOlapLoading] = useState(false);
   const [olapError, setOlapError] = useState("");
-  const [selectedYear, setSelectedYear] = useState(
-    String(new Date().getFullYear())
-  );
+  const [selectedYear, setSelectedYear] = useState("2026");
+
+  const fetchJson = async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Request failed (${response.status})`);
+    }
+    return response.json();
+  };
 
   const loadDashboard = useCallback(async () => {
-    setDashboardLoading(true);
-    setDashboardError("");
+    setLoading(true);
+    setError("");
 
     const results = await Promise.allSettled([
       fetchJson(`${API_BASE}/api/summary`),
@@ -97,63 +48,45 @@ function App() {
     if (results[0].status === "fulfilled") {
       setSummary(results[0].value);
     } else {
-      setDashboardError(
-        `Could not load summary: ${results[0].reason?.message || "Unknown error"}`
-      );
+      setError("Could not load spending summary. Please refresh.");
     }
 
     if (results[1].status === "fulfilled") {
-      setCategories(extractRows(results[1].value));
+      const data = results[1].value;
+      setCategories(
+        Array.isArray(data)
+          ? data
+          : Array.isArray(data?.categories)
+            ? data.categories
+            : []
+      );
     }
 
     if (results[2].status === "fulfilled") {
-      setAnomalies(extractRows(results[2].value));
-    }
-
-    setDashboardLoading(false);
-  }, []);
-
-  const loadHistory = useCallback(async () => {
-    setHistoryLoading(true);
-    setHistoryError("");
-
-    try {
-      const response = await fetchJson(
-        `${API_BASE}/api/olap/roll-up`
+      const data = results[2].value;
+      setAnomalies(
+        Array.isArray(data)
+          ? data
+          : Array.isArray(data?.anomalies)
+            ? data.anomalies
+            : Array.isArray(data?.unusual_transactions)
+              ? data.unusual_transactions
+              : []
       );
-
-      const rows = extractRows(response);
-
-      const normalized = rows
-        .map((row) => ({
-          ...row,
-          year: Number(row.year),
-          month: Number(row.month),
-          total_spending: Number(row.total_spending) || 0,
-          average_spending: Number(row.average_spending) || 0,
-          transaction_count: Number(row.transaction_count) || 0,
-          period: `${row.month_name || row.month} ${row.year}`,
-        }))
-        .sort((a, b) => a.year - b.year || a.month - b.month);
-
-      setHistory(normalized);
-    } catch (error) {
-      setHistoryError(error.message || "Could not load spending history.");
-    } finally {
-      setHistoryLoading(false);
     }
+
+    setLoading(false);
   }, []);
 
   useEffect(() => {
     loadDashboard();
-    loadHistory();
-  }, [loadDashboard, loadHistory]);
+  }, [loadDashboard]);
 
   async function loadOlap(operation) {
     setOlapOperation(operation);
-    setOlapResults([]);
-    setOlapError("");
     setOlapLoading(true);
+    setOlapError("");
+    setOlapResults([]);
 
     try {
       let url = `${API_BASE}/api/olap/${operation}`;
@@ -163,490 +96,439 @@ function App() {
       }
 
       const response = await fetchJson(url);
-      const rows = extractRows(response);
+      const rows = Array.isArray(response)
+        ? response
+        : Array.isArray(response?.data)
+          ? response.data
+          : [];
+
       setOlapResults(rows);
-    } catch (error) {
-      setOlapError(error.message || "Could not load OLAP results.");
+
+      if (!Array.isArray(response) && !Array.isArray(response?.data)) {
+        throw new Error("Unexpected response format from the OLAP API.");
+      }
+    } catch (err) {
+      setOlapError(err.message || "Unable to load OLAP results.");
     } finally {
       setOlapLoading(false);
     }
   }
 
-  const categoryData = categories
-    .map((item) => ({
-      category: categoryName(item),
-      total: categoryAmount(item),
-    }))
-    .sort((a, b) => b.total - a.total);
+  const total = summary?.total_spending ?? summary?.total_expenses ?? 0;
+  const transactions =
+    summary?.transaction_count ?? summary?.total_transactions ?? 0;
+  const average =
+    summary?.average_spending ??
+    (Number(transactions) ? Number(total) / Number(transactions) : 0);
 
-  const categoryTotal = categoryData.reduce(
-    (sum, item) => sum + item.total,
+  const categoryName = (item) =>
+    item.category_name ?? item.category ?? item.name ?? "Other";
+
+  const categoryAmount = (item) =>
+    Number(
+      item.total_spending ??
+        item.total_amount ??
+        item.amount ??
+        item.total ??
+        0
+    );
+
+  const categoryTotal = categories.reduce(
+    (sum, item) => sum + categoryAmount(item),
     0
   );
 
-  const olapColumns =
-    olapResults.length > 0 ? Object.keys(olapResults[0]) : [];
+  const maxCategory = Math.max(
+    1,
+    ...categories.map(categoryAmount)
+  );
 
   const operationLabels = {
-    "roll-up": "Roll-Up Analysis",
-    slice: `Slice Analysis — ${selectedYear}`,
-    dice: "Dice Analysis",
-    pivot: "Pivot Analysis",
+    "roll-up": "Roll-up · Monthly summary",
+    slice: `Slice · ${selectedYear} analysis`,
+    dice: "Dice · Filtered analysis",
+    pivot: "Pivot · Category comparison",
   };
+
+  const columns =
+    olapResults.length > 0 ? Object.keys(olapResults[0]) : [];
 
   const formatCell = (key, value) => {
     if (value === null || value === undefined) return "—";
-
-    if (
-      typeof value === "number" &&
-      /amount|spending|total|average|^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)$/i.test(key)
-    ) {
-      return currency(value);
+    if (typeof value === "number" && /amount|spending|total|average/i.test(key)) {
+      return money(value);
     }
-
     if (typeof value === "object") return JSON.stringify(value);
     return String(value);
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">S</div>
-          <div>
-            <h2>SmartSpend</h2>
-            <span>Personal Finance Analytics</span>
-          </div>
-        </div>
+    <div className="spend-app">
+      <header className="top-nav">
+        <a className="top-brand" href="#home">
+          <span className="brand-mark">S.</span>
+          <span>smartspend<small>PERSONAL FINANCE LAB</small></span>
+        </a>
 
-        <nav className="sidebar-nav">
-          <a href="#dashboard" className="nav-link active">▦ Dashboard</a>
-          <a href="#categories" className="nav-link">◷ Categories</a>
-          <a href="#history" className="nav-link">▥ Spending History</a>
-          <a href="#olap" className="nav-link">▤ OLAP Analytics</a>
-          <a href="#anomalies" className="nav-link">◇ Spending Insights</a>
+        <nav className="top-links">
+          <a className="top-link active" href="#home">Overview</a>
+          <a className="top-link" href="#categories">Categories</a>
+          <a className="top-link" href="#insights">Insights</a>
+          <a className="top-link" href="#analytics">OLAP Lab</a>
         </nav>
 
-        <div className="sidebar-footer">
-          <span className="status-dot" />
-          Data Warehouse Analytics
-        </div>
-      </aside>
+        <button
+          className="nav-refresh"
+          onClick={loadDashboard}
+          disabled={loading}
+          type="button"
+        >
+          {loading ? "Loading…" : "↻ Refresh"}
+        </button>
+      </header>
 
-      <main className="main-content" id="dashboard">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">PERSONAL FINANCE</p>
-            <h1>Spending Dashboard</h1>
-            <p className="subtitle">
-              Track, understand, and analyze your spending patterns.
+      <main className="spend-main" id="home">
+        {error && <div className="alert-box">{error}</div>}
+
+        <section className="welcome-banner">
+          <div className="welcome-copy">
+            <p className="overline">YOUR MONEY, IN PERSPECTIVE</p>
+            <h1>Make every<br />rupee <em>count.</em></h1>
+            <p className="welcome-description">
+              A clearer view of your spending habits, category patterns,
+              and historical financial activity.
             </p>
+            <a href="#analytics" className="banner-link">
+              Explore your data <span>↗</span>
+            </a>
           </div>
 
-          <button
-            className="refresh-button"
-            onClick={() => {
-              loadDashboard();
-              loadHistory();
-            }}
-            disabled={dashboardLoading || historyLoading}
-          >
-            ↻ Refresh data
-          </button>
-        </header>
+          <div className="banner-visual" aria-hidden="true">
+            <div className="orbit orbit-one" />
+            <div className="orbit orbit-two" />
+            <div className="orbit-center">
+              <span>₹</span>
+              <small>INR</small>
+            </div>
+            <span className="orbit-label label-top">TRACK</span>
+            <span className="orbit-label label-right">LEARN</span>
+            <span className="orbit-label label-bottom">GROW</span>
+          </div>
 
-        {dashboardError && (
-          <p className="error-message" role="alert">{dashboardError}</p>
-        )}
-
-        <section className="metrics-grid">
-          <article className="metric-card">
-            <span className="metric-label">Total Spending</span>
-            <span className="metric-icon">₹</span>
-            <h2>
-              {summary
-                ? currency(summary.total_spending)
-                : dashboardLoading ? "Loading..." : "—"}
-            </h2>
-            <p>Recorded expenses</p>
-          </article>
-
-          <article className="metric-card">
-            <span className="metric-label">Total Transactions</span>
-            <span className="metric-icon">↗</span>
-            <h2>
-              {summary
-                ? number(summary.transaction_count)
-                : dashboardLoading ? "Loading..." : "—"}
-            </h2>
-            <p>Historical records</p>
-          </article>
-
-          <article className="metric-card">
-            <span className="metric-label">Average Transaction</span>
-            <span className="metric-icon">₹</span>
-            <h2>
-              {summary
-                ? currency(summary.average_spending)
-                : dashboardLoading ? "Loading..." : "—"}
-            </h2>
-            <p>Average amount spent</p>
-          </article>
-
-          <article className="metric-card">
-            <span className="metric-label">Categories Tracked</span>
-            <span className="metric-icon">▦</span>
-            <h2>{number(categoryData.length)}</h2>
-            <p>Spending categories</p>
-          </article>
-
-          <article className="metric-card">
-            <span className="metric-label">Unusual Transactions</span>
-            <span className="metric-icon">◇</span>
-            <h2>{number(anomalies.length)}</h2>
-            <p>Returned by mining API</p>
-          </article>
-
-          <article className="metric-card">
-            <span className="metric-label">Data Source</span>
-            <span className="metric-icon">▤</span>
-            <h2 className="source-value">
-              {summary?.data_source === "database"
-                ? "Database"
-                : summary?.data_source === "demo_fallback"
-                  ? "Demo data"
-                  : summary ? "API" : "—"}
-            </h2>
-            <p>Reported by backend</p>
-          </article>
+          <div className="banner-index">
+            <span>01 / OVERVIEW</span>
+            <span>SMARTSPEND ANALYTICS</span>
+          </div>
         </section>
 
-        <section className="panel" id="categories">
-          <div className="panel-heading">
+        <section className="section-block" aria-label="Financial overview">
+          <div className="section-intro">
             <div>
-              <h3>Historical Spending by Category</h3>
-              <p>Compare recorded spending for each category.</p>
+              <p className="overline">THE BIG PICTURE</p>
+              <h2>Your numbers, at a glance.</h2>
             </div>
+            <span className="data-chip">
+              <span className="live-dot" /> LIVE DATA
+            </span>
           </div>
 
-          {dashboardLoading && categoryData.length === 0 ? (
-            <p className="empty-state">Loading categories...</p>
-          ) : categoryData.length === 0 ? (
-            <p className="empty-state">No category records were returned.</p>
-          ) : (
-            <>
-              <div className="chart-container">
-                <ResponsiveContainer width="100%" height={320}>
-                  <PieChart>
-                    <Pie
-                      data={categoryData}
-                      dataKey="total"
-                      nameKey="category"
-                      innerRadius={55}
-                      outerRadius={100}
-                      paddingAngle={2}
-                    >
-                      {categoryData.map((item, index) => (
-                        <Cell
-                          key={item.category}
-                          fill={COLORS[index % COLORS.length]}
-                        />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(value) => currency(value)} />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
+          <div className="stat-grid">
+            <article className="stat-card stat-featured">
+              <div className="stat-top">
+                <span>Total spending</span>
+                <span className="stat-symbol">₹</span>
               </div>
+              <h3>{loading && !summary ? "…" : money(total)}</h3>
+              <div className="stat-bottom">
+                <span>Recorded expenses</span>
+                <span className="stat-arrow">↗</span>
+              </div>
+            </article>
 
-              <div className="category-list">
-                {categoryData.map((item, index) => (
-                  <div className="category-row" key={item.category}>
-                    <div className="category-row-heading">
-                      <span>{item.category}</span>
-                      <strong>{currency(item.total)}</strong>
+            <article className="stat-card">
+              <div className="stat-top">
+                <span>Transactions</span>
+                <span className="stat-symbol">#</span>
+              </div>
+              <h3>{loading && !summary ? "…" : number(transactions)}</h3>
+              <div className="stat-bottom">
+                <span>Recorded entries</span>
+                <span className="stat-arrow">↗</span>
+              </div>
+            </article>
+
+            <article className="stat-card">
+              <div className="stat-top">
+                <span>Average transaction</span>
+                <span className="stat-symbol">≈</span>
+              </div>
+              <h3>{loading && !summary ? "…" : money(average)}</h3>
+              <div className="stat-bottom">
+                <span>Per recorded transaction</span>
+                <span className="stat-arrow">↗</span>
+              </div>
+            </article>
+
+            <article className="stat-card">
+              <div className="stat-top">
+                <span>Categories</span>
+                <span className="stat-symbol">◫</span>
+              </div>
+              <h3>{number(categories.length)}</h3>
+              <div className="stat-bottom">
+                <span>Expense groups</span>
+                <span className="stat-arrow">↗</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="analysis-layout" id="categories">
+          <article className="content-card category-card">
+            <div className="card-heading">
+              <div>
+                <p className="overline">WHERE IT GOES</p>
+                <h2>Spending by category</h2>
+                <p className="muted-copy">
+                  Compare recorded totals across expense groups.
+                </p>
+              </div>
+              <span className="round-decoration">↗</span>
+            </div>
+
+            {loading && categories.length === 0 ? (
+              <p className="empty-copy">Loading category data…</p>
+            ) : categories.length === 0 ? (
+              <p className="empty-copy">No category records returned.</p>
+            ) : (
+              <div className="category-bars">
+                {categories.map((item, index) => {
+                  const amount = categoryAmount(item);
+                  const percent = (amount / maxCategory) * 100;
+
+                  return (
+                    <div className="category-entry" key={`${categoryName(item)}-${index}`}>
+                      <div className="category-entry-top">
+                        <span className="category-number">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="category-entry-name">{categoryName(item)}</span>
+                        <strong>{money(amount)}</strong>
+                      </div>
+                      <div className="bar-rail">
+                        <div
+                          className={`bar-fill bar-color-${index % 5}`}
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="progress-track">
-                      <div
-                        className="progress-fill"
-                        style={{
-                          width: `${categoryTotal > 0
-                            ? (item.total / categoryTotal) * 100
-                            : 0}%`,
-                          background: COLORS[index % COLORS.length],
-                        }}
-                      />
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="category-total">
+              <span>Total of displayed categories</span>
+              <strong>{money(categoryTotal)}</strong>
+            </div>
+          </article>
+
+          <article className="content-card insight-card" id="insights">
+            <div className="card-heading">
+              <div>
+                <p className="overline">PATTERN DETECTION</p>
+                <h2>Spending signals</h2>
+                <p className="muted-copy">
+                  Results returned by the anomaly analysis API.
+                </p>
+              </div>
+              <span className="signal-icon">⌁</span>
+            </div>
+
+            <div className="signal-count">
+              <span className="signal-count-number">{number(anomalies.length)}</span>
+              <span className="signal-count-label">
+                unusual transaction{anomalies.length === 1 ? "" : "s"} returned
+              </span>
+            </div>
+
+            {loading && anomalies.length === 0 ? (
+              <p className="empty-copy">Checking spending signals…</p>
+            ) : anomalies.length === 0 ? (
+              <div className="no-signals">
+                <span className="check-mark">✓</span>
+                <div>
+                  <strong>No unusual transactions returned</strong>
+                  <p>The current analysis returned no anomaly records.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="signal-list">
+                {anomalies.slice(0, 8).map((item, index) => (
+                  <div className="signal-row" key={index}>
+                    <span className="signal-alert">!</span>
+                    <div>
+                      <strong>
+                        {item.description ?? item.category_name ?? item.category ?? `Transaction ${index + 1}`}
+                      </strong>
+                      <span>
+                        {item.full_date ?? item.date ?? item.transaction_date ?? "Date not provided"}
+                      </span>
                     </div>
+                    <b>{money(item.amount ?? item.total_spending ?? 0)}</b>
                   </div>
                 ))}
               </div>
+            )}
 
-              <p className="note">
-                Total of displayed category values:{" "}
-                <strong>{currency(categoryTotal)}</strong>
-              </p>
-            </>
-          )}
+            <div className="insight-foot">
+              <span>MINING OUTPUT</span>
+              <span>SMARTSPEND / 01</span>
+            </div>
+          </article>
         </section>
 
-        <section className="panel" id="history">
-          <div className="panel-heading">
+        <section className="olap-section" id="analytics">
+          <div className="olap-heading">
             <div>
-              <h3>Spending History</h3>
-              <p>Monthly spending totals from your data warehouse.</p>
+              <p className="overline">MULTIDIMENSIONAL EXPLORATION</p>
+              <h2>The OLAP laboratory.</h2>
+              <p>
+                Switch between aggregation, year filtering, dimensional
+                filtering, and cross-category comparison.
+              </p>
             </div>
+
+            <div className="year-picker">
+              <label htmlFor="slice-year">SLICE YEAR</label>
+              <select
+                id="slice-year"
+                value={selectedYear}
+                onChange={(event) => setSelectedYear(event.target.value)}
+              >
+                {Array.from({ length: 10 }, (_, index) =>
+                  String(new Date().getFullYear() - index)
+                ).map((year) => (
+                  <option key={year} value={year}>{year}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="olap-options">
             <button
-              className="secondary-button"
-              onClick={loadHistory}
-              disabled={historyLoading}
+              className={`olap-option ${olapOperation === "roll-up" ? "chosen" : ""}`}
+              onClick={() => loadOlap("roll-up")}
+              disabled={olapLoading}
+              type="button"
             >
-              Refresh history
+              <span className="operation-index">01</span>
+              <span className="operation-name">Roll-up</span>
+              <span className="operation-description">Summarize by time levels</span>
+              <span className="operation-arrow">↗</span>
+            </button>
+
+            <button
+              className={`olap-option ${olapOperation === "slice" ? "chosen" : ""}`}
+              onClick={() => loadOlap("slice")}
+              disabled={olapLoading}
+              type="button"
+            >
+              <span className="operation-index">02</span>
+              <span className="operation-name">Slice</span>
+              <span className="operation-description">Focus on one year</span>
+              <span className="operation-arrow">↗</span>
+            </button>
+
+            <button
+              className={`olap-option ${olapOperation === "dice" ? "chosen" : ""}`}
+              onClick={() => loadOlap("dice")}
+              disabled={olapLoading}
+              type="button"
+            >
+              <span className="operation-index">03</span>
+              <span className="operation-name">Dice</span>
+              <span className="operation-description">Filter multiple dimensions</span>
+              <span className="operation-arrow">↗</span>
+            </button>
+
+            <button
+              className={`olap-option ${olapOperation === "pivot" ? "chosen" : ""}`}
+              onClick={() => loadOlap("pivot")}
+              disabled={olapLoading}
+              type="button"
+            >
+              <span className="operation-index">04</span>
+              <span className="operation-name">Pivot</span>
+              <span className="operation-description">Compare category totals</span>
+              <span className="operation-arrow">↗</span>
             </button>
           </div>
 
-          {historyLoading && history.length === 0 && (
-            <p className="empty-state">Loading monthly history...</p>
-          )}
-          {historyError && (
-            <p className="error-message">{historyError}</p>
-          )}
-          {!historyLoading && !historyError && history.length === 0 && (
-            <p className="empty-state">No monthly history data was returned.</p>
-          )}
-
-          {history.length > 0 && (
-            <div className="chart-container">
-              <ResponsiveContainer width="100%" height={340}>
-                <LineChart
-                  data={history}
-                  margin={{ top: 15, right: 20, left: 15, bottom: 35 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="period"
-                    angle={-25}
-                    textAnchor="end"
-                    interval="preserveStartEnd"
-                  />
-                  <YAxis
-                    tickFormatter={(value) => `₹${number(value)}`}
-                  />
-                  <Tooltip
-                    formatter={(value) => currency(value)}
-                  />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="total_spending"
-                    name="Monthly spending"
-                    stroke="#2563eb"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {history.length > 0 && (
-            <div className="chart-container">
-              <h3>Monthly Spending Comparison</h3>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={history}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="period" />
-                  <YAxis tickFormatter={(value) => `₹${number(value)}`} />
-                  <Tooltip formatter={(value) => currency(value)} />
-                  <Bar
-                    dataKey="total_spending"
-                    name="Monthly spending"
-                    fill="#0d9488"
-                    radius={[5, 5, 0, 0]}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </section>
-
-        <section className="panel" id="olap">
-          <div className="panel-heading">
-            <div>
-              <h3>📊 OLAP Analytics</h3>
-              <p>Explore historical spending using multidimensional analysis.</p>
-            </div>
-            <span className="section-badge">Data Warehouse</span>
-          </div>
-
-          <div className="olap-controls">
-            <label htmlFor="slice-year">Year for Slice analysis</label>
-            <select
-              id="slice-year"
-              value={selectedYear}
-              onChange={(event) => setSelectedYear(event.target.value)}
-            >
-              {Array.from({ length: 10 }, (_, index) =>
-                String(new Date().getFullYear() - index)
-              ).map((year) => (
-                <option key={year} value={year}>{year}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="olap-grid">
-            {[
-              ["roll-up", "Roll-Up", "Summarize spending by year and month"],
-              ["slice", "Slice", "Analyze category spending for one year"],
-              ["dice", "Dice", "Filter spending across dimensions"],
-              ["pivot", "Pivot", "Compare categories across calendar months"],
-            ].map(([operation, title, description]) => (
-              <button
-                key={operation}
-                type="button"
-                className="olap-card"
-                onClick={() => loadOlap(operation)}
-                disabled={olapLoading}
-              >
-                <strong>{title}</strong>
-                <span>{description}</span>
-              </button>
-            ))}
-          </div>
-
           {(olapOperation || olapLoading || olapError) && (
-            <div className="olap-results" aria-live="polite">
-              <div className="panel-heading">
+            <div className="olap-output">
+              <div className="output-heading">
                 <div>
-                  <h3>{operationLabels[olapOperation] || "OLAP Results"}</h3>
-                  <p>Results from your SmartSpend backend.</p>
+                  <p className="overline">QUERY OUTPUT</p>
+                  <h3>{operationLabels[olapOperation] || "Analysis results"}</h3>
                 </div>
                 <button
-                  className="close-results"
+                  className="output-clear"
+                  type="button"
                   onClick={() => {
                     setOlapOperation("");
                     setOlapResults([]);
                     setOlapError("");
                   }}
                 >
-                  Clear
+                  Clear ×
                 </button>
               </div>
 
-              {olapLoading && (
-                <p className="empty-state">Loading OLAP results...</p>
-              )}
-              {olapError && (
-                <p className="error-message">{olapError}</p>
-              )}
+              {olapLoading && <p className="empty-copy">Running analysis…</p>}
+              {olapError && <div className="alert-box">{olapError}</div>}
+
               {!olapLoading && !olapError && olapResults.length === 0 && (
-                <p className="empty-state">No records returned for this operation.</p>
+                <p className="empty-copy">No records returned for this operation.</p>
               )}
 
               {!olapLoading && !olapError && olapResults.length > 0 && (
-                <div className="table-wrapper">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        {olapColumns.map((column) => (
-                          <th key={column}>
-                            {column.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase())}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {olapResults.map((row, index) => (
-                        <tr key={index}>
-                          {olapColumns.map((column) => (
-                            <td key={column}>
-                              {formatCell(column, row[column])}
-                            </td>
+                <>
+                  <p className="result-count">
+                    {number(olapResults.length)} ROWS RETURNED
+                  </p>
+                  <div className="responsive-table">
+                    <table className="result-table">
+                      <thead>
+                        <tr>
+                          {columns.map((key) => (
+                            <th key={key}>
+                              {key.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase())}
+                            </th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {olapResults.map((row, index) => (
+                          <tr key={index}>
+                            {columns.map((key) => (
+                              <td key={key}>{formatCell(key, row[key])}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
-
-              {olapOperation === "roll-up" && olapResults.length > 0 && (
-                <div className="chart-container">
-                  <h3>Roll-Up Monthly Trend</h3>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <LineChart data={olapResults}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month_name" />
-                      <YAxis />
-                      <Tooltip formatter={(value) => currency(value)} />
-                      <Line
-                        type="monotone"
-                        dataKey="total_spending"
-                        name="Monthly spending"
-                        stroke="#2563eb"
-                        strokeWidth={3}
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-
-              {olapOperation === "pivot" && olapResults.length > 0 && (
-                <div className="table-wrapper">
-                  <p className="note">
-                    Pivot compares category spending across calendar months.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          <p className="note">
-            Select an operation to view its results inside the dashboard.
-          </p>
-        </section>
-
-        <section className="panel" id="anomalies">
-          <div className="panel-heading">
-            <div>
-              <h3>Unusual Spending Insights</h3>
-              <p>Review unusual transactions returned by the mining API.</p>
-            </div>
-          </div>
-
-          {dashboardLoading && anomalies.length === 0 ? (
-            <p className="empty-state">Loading spending insights...</p>
-          ) : anomalies.length === 0 ? (
-            <p className="empty-state">
-              No unusual transactions detected, or no anomaly records were returned.
-            </p>
-          ) : (
-            <div className="table-wrapper">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    {Object.keys(anomalies[0]).map((key) => (
-                      <th key={key}>
-                        {key.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase())}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {anomalies.map((row, index) => (
-                    <tr key={index}>
-                      {Object.keys(anomalies[0]).map((key) => (
-                        <td key={key}>{formatCell(key, row[key])}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           )}
         </section>
 
-        <footer className="page-footer">
-          SmartSpend · Historical Spending Analytics · Data Warehouse
+        <footer className="spend-footer">
+          <a className="footer-brand" href="#home">smartspend.</a>
+          <span>PERSONAL FINANCE ANALYTICS</span>
+          <a href="#home">Back to top ↑</a>
         </footer>
       </main>
     </div>
