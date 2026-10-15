@@ -1,6 +1,6 @@
 
 from sqlalchemy import text, bindparam
-from backend.database import engine
+from database import engine
 
 
 def run_query(sql, params=None, expanding=None):
