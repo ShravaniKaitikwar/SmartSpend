@@ -4,535 +4,559 @@ import "./App.css";
 
 const API_BASE = "https://smartspend-backend-iu60.onrender.com";
 
-const money = (value) =>
+const formatMoney = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 2,
   }).format(Number(value) || 0);
 
-const number = (value) =>
-  new Intl.NumberFormat("en-IN").format(Number(value) || 0);
+const getRows = (response) => {
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response?.data)) return response.data;
+  if (Array.isArray(response?.categories)) return response.categories;
+  if (Array.isArray(response?.anomalies)) return response.anomalies;
+  if (Array.isArray(response?.unusual_transactions))
+    return response.unusual_transactions;
+  return [];
+};
 
-function App() {
-  const [summary, setSummary] = useState(null);
-  const [categories, setCategories] = useState([]);
-  const [anomalies, setAnomalies] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+async function apiRequest(path) {
+  const response = await fetch(`${API_BASE}${path}`);
+  const body = await response.json().catch(() => ({}));
 
-  const [olapResults, setOlapResults] = useState([]);
-  const [olapOperation, setOlapOperation] = useState("");
-  const [olapLoading, setOlapLoading] = useState(false);
-  const [olapError, setOlapError] = useState("");
-  const [selectedYear, setSelectedYear] = useState("2026");
-
-  const fetchJson = async (url) => {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Request failed (${response.status})`);
-    }
-    return response.json();
-  };
-
-  const loadDashboard = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
-    const results = await Promise.allSettled([
-      fetchJson(`${API_BASE}/api/summary`),
-      fetchJson(`${API_BASE}/api/categories`),
-      fetchJson(`${API_BASE}/api/mining/anomalies`),
-    ]);
-
-    if (results[0].status === "fulfilled") {
-      setSummary(results[0].value);
-    } else {
-      setError("Could not load spending summary. Please refresh.");
-    }
-
-    if (results[1].status === "fulfilled") {
-      const data = results[1].value;
-      setCategories(
-        Array.isArray(data)
-          ? data
-          : Array.isArray(data?.categories)
-            ? data.categories
-            : []
-      );
-    }
-
-    if (results[2].status === "fulfilled") {
-      const data = results[2].value;
-      setAnomalies(
-        Array.isArray(data)
-          ? data
-          : Array.isArray(data?.anomalies)
-            ? data.anomalies
-            : Array.isArray(data?.unusual_transactions)
-              ? data.unusual_transactions
-              : []
-      );
-    }
-
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    loadDashboard();
-  }, [loadDashboard]);
-
-  async function loadOlap(operation) {
-    setOlapOperation(operation);
-    setOlapLoading(true);
-    setOlapError("");
-    setOlapResults([]);
-
-    try {
-      let url = `${API_BASE}/api/olap/${operation}`;
-
-      if (operation === "slice") {
-        url += `?year=${encodeURIComponent(selectedYear)}`;
-      }
-
-      const response = await fetchJson(url);
-      const rows = Array.isArray(response)
-        ? response
-        : Array.isArray(response?.data)
-          ? response.data
-          : [];
-
-      setOlapResults(rows);
-
-      if (!Array.isArray(response) && !Array.isArray(response?.data)) {
-        throw new Error("Unexpected response format from the OLAP API.");
-      }
-    } catch (err) {
-      setOlapError(err.message || "Unable to load OLAP results.");
-    } finally {
-      setOlapLoading(false);
-    }
+  if (!response.ok) {
+    throw new Error(
+      body.detail || body.message || `Request failed (${response.status})`
+    );
   }
 
-  const total = summary?.total_spending ?? summary?.total_expenses ?? 0;
-  const transactions =
-    summary?.transaction_count ?? summary?.total_transactions ?? 0;
-  const average =
-    summary?.average_spending ??
-    (Number(transactions) ? Number(total) / Number(transactions) : 0);
+  return body;
+}
 
-  const categoryName = (item) =>
-    item.category_name ?? item.category ?? item.name ?? "Other";
-
-  const categoryAmount = (item) =>
-    Number(
-      item.total_spending ??
-        item.total_amount ??
-        item.amount ??
-        item.total ??
-        0
-    );
-
-  const categoryTotal = categories.reduce(
-    (sum, item) => sum + categoryAmount(item),
-    0
+function MetricCard({ label, value, detail, icon }) {
+  return (
+    <article className="metric-card">
+      <div className="metric-top">
+        <span className="metric-label">{label}</span>
+        <span className="metric-icon">{icon}</span>
+      </div>
+      <div className="metric-value">{value}</div>
+      <div className="metric-detail">{detail}</div>
+    </article>
   );
+}
 
-  const maxCategory = Math.max(
-    1,
-    ...categories.map(categoryAmount)
-  );
+function EmptyState({ children }) {
+  return <div className="empty-state">{children}</div>;
+}
 
-  const operationLabels = {
-    "roll-up": "Roll-up · Monthly summary",
-    slice: `Slice · ${selectedYear} analysis`,
-    dice: "Dice · Filtered analysis",
-    pivot: "Pivot · Category comparison",
-  };
+function DataTable({ rows }) {
+  if (!rows.length) {
+    return <EmptyState>No records to display for this operation.</EmptyState>;
+  }
 
-  const columns =
-    olapResults.length > 0 ? Object.keys(olapResults[0]) : [];
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
 
-  const formatCell = (key, value) => {
-    if (value === null || value === undefined) return "—";
-    if (typeof value === "number" && /amount|spending|total|average/i.test(key)) {
-      return money(value);
+  const displayValue = (key, value) => {
+    if (value === null || value === undefined || value === "") return "—";
+    if (
+      typeof value === "number" &&
+      /amount|spending|total|average|expense|sum/i.test(key)
+    ) {
+      return formatMoney(value);
     }
     if (typeof value === "object") return JSON.stringify(value);
     return String(value);
   };
 
   return (
-    <div className="spend-app">
-      <header className="top-nav">
-        <a className="top-brand" href="#home">
-          <span className="brand-mark">S.</span>
-          <span>smartspend<small>PERSONAL FINANCE LAB</small></span>
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column}>{column.replaceAll("_", " ")}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={row.transaction_id ?? row.id ?? index}>
+              {columns.map((column) => (
+                <td key={column}>{displayValue(column, row[column])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default function App() {
+  const [summary, setSummary] = useState(null);
+  const [categories, setCategories] = useState([]);
+  const [anomalies, setAnomalies] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [errors, setErrors] = useState([]);
+
+  const [operation, setOperation] = useState("roll-up");
+  const [year, setYear] = useState("2026");
+  const [olapRows, setOlapRows] = useState([]);
+  const [olapLoading, setOlapLoading] = useState(false);
+  const [olapError, setOlapError] = useState("");
+  const [olapMessage, setOlapMessage] = useState("");
+
+  const loadDashboard = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
+
+    const results = await Promise.allSettled([
+      apiRequest("/api/summary"),
+      apiRequest("/api/categories"),
+      apiRequest("/api/mining/anomalies"),
+    ]);
+
+    const nextErrors = [];
+
+    if (results[0].status === "fulfilled") {
+      setSummary(results[0].value);
+    } else {
+      nextErrors.push(`Summary: ${results[0].reason.message}`);
+    }
+
+    if (results[1].status === "fulfilled") {
+      setCategories(getRows(results[1].value));
+    } else {
+      nextErrors.push(`Categories: ${results[1].reason.message}`);
+    }
+
+    if (results[2].status === "fulfilled") {
+      setAnomalies(getRows(results[2].value));
+    } else {
+      nextErrors.push(`Insights: ${results[2].reason.message}`);
+    }
+
+    setErrors(nextErrors);
+    setLoading(false);
+    setRefreshing(false);
+  }, []);
+
+  const runOlap = useCallback(async () => {
+    setOlapLoading(true);
+    setOlapError("");
+    setOlapMessage("");
+    setOlapRows([]);
+
+    try {
+      let path = `/api/olap/${operation}`;
+
+      if (operation === "slice") {
+        path += `?year=${encodeURIComponent(year)}`;
+      }
+
+      const result = await apiRequest(path);
+      const rows = getRows(result);
+
+      setOlapRows(rows);
+      setOlapMessage(
+        result.description ||
+          result.message ||
+          `${operation.toUpperCase()} completed.`
+      );
+
+      if (!rows.length && !result.description && !result.message) {
+        setOlapMessage(
+          "The API responded, but returned no rows in a recognized data array."
+        );
+      }
+    } catch (error) {
+      setOlapError(
+        `${error.message}. Check the API response and required parameters for this operation.`
+      );
+    } finally {
+      setOlapLoading(false);
+    }
+  }, [operation, year]);
+
+  useEffect(() => {
+    loadDashboard();
+  }, [loadDashboard]);
+
+  const totalSpending = Number(
+    summary?.total_spending ?? summary?.total_expenses ?? 0
+  );
+
+  const transactionCount = Number(
+    summary?.transaction_count ?? summary?.total_transactions ?? 0
+  );
+
+  const averageSpending = Number(
+    summary?.average_spending ??
+      (transactionCount ? totalSpending / transactionCount : 0)
+  );
+
+  const categoryCount = categories.length;
+
+  const getCategoryName = (item) =>
+    item.category_name ?? item.category ?? item.name ?? "Other";
+
+  const getCategoryAmount = (item) =>
+    Number(
+      item.total_spending ??
+        item.total_amount ??
+        item.amount ??
+        item.total ??
+        item.sum ??
+        0
+    );
+
+  const categoryTotal = categories.reduce(
+    (total, item) => total + getCategoryAmount(item),
+    0
+  );
+
+  const getAnomalyDescription = (item) =>
+    item.description ??
+    item.reason ??
+    item.transaction_description ??
+    item.category_name ??
+    item.category ??
+    "Unusual transaction";
+
+  const getAnomalyAmount = (item) =>
+    item.amount ?? item.total_amount ?? item.spending;
+
+  return (
+    <div className="app-shell" id="dashboard">
+      <header className="topbar">
+        <a className="brand" href="#dashboard" aria-label="SmartSpend home">
+          <span className="brand-mark">S</span>
+          <span>
+            <strong>smartspend</strong>
+            <small>PERSONAL FINANCE LAB</small>
+          </span>
         </a>
 
-        <nav className="top-links">
-          <a className="top-link active" href="#home">Overview</a>
-          <a className="top-link" href="#categories">Categories</a>
-          <a className="top-link" href="#insights">Insights</a>
-          <a className="top-link" href="#analytics">OLAP Lab</a>
+        <nav className="nav-links" aria-label="Main navigation">
+          <a className="active" href="#overview">Overview</a>
+          <a href="#categories">Categories</a>
+          <a href="#insights">Insights</a>
+          <a href="#olap">OLAP Lab</a>
         </nav>
 
         <button
-          className="nav-refresh"
-          onClick={loadDashboard}
-          disabled={loading}
-          type="button"
+          className="refresh-button"
+          onClick={() => loadDashboard(true)}
+          disabled={refreshing}
         >
-          {loading ? "Loading…" : "↻ Refresh"}
+          {refreshing ? "Refreshing…" : "↻ Refresh"}
         </button>
       </header>
 
-      <main className="spend-main" id="home">
-        {error && <div className="alert-box">{error}</div>}
-
-        <section className="welcome-banner">
-          <div className="welcome-copy">
-            <p className="overline">YOUR MONEY, IN PERSPECTIVE</p>
-            <h1>Make every<br />rupee <em>count.</em></h1>
-            <p className="welcome-description">
+      <main>
+        <section className="hero" id="overview">
+          <div className="hero-copy">
+            <div className="eyebrow">
+              <span className="status-dot" />
+              YOUR MONEY, IN PERSPECTIVE
+            </div>
+            <h1>
+              Make every
+              <br />
+              rupee <span>count.</span>
+            </h1>
+            <p>
               A clearer view of your spending habits, category patterns,
               and historical financial activity.
             </p>
-            <a href="#analytics" className="banner-link">
+            <a className="hero-link" href="#categories">
               Explore your data <span>↗</span>
             </a>
           </div>
 
-          <div className="banner-visual" aria-hidden="true">
+          <div className="hero-art" aria-hidden="true">
             <div className="orbit orbit-one" />
             <div className="orbit orbit-two" />
-            <div className="orbit-center">
-              <span>₹</span>
-              <small>INR</small>
-            </div>
-            <span className="orbit-label label-top">TRACK</span>
-            <span className="orbit-label label-right">LEARN</span>
-            <span className="orbit-label label-bottom">GROW</span>
+            <div className="orbit orbit-three" />
+            <div className="hero-coin">₹</div>
+            <span className="art-label art-label-one">TRACK</span>
+            <span className="art-label art-label-two">LEARN</span>
+            <span className="art-label art-label-three">GROW</span>
+            <div className="art-dot dot-one" />
+            <div className="art-dot dot-two" />
+            <div className="art-dot dot-three" />
           </div>
 
-          <div className="banner-index">
-            <span>01 / OVERVIEW</span>
+          <div className="hero-footer">
             <span>SMARTSPEND ANALYTICS</span>
+            <span>01 / OVERVIEW</span>
           </div>
         </section>
 
-        <section className="section-block" aria-label="Financial overview">
-          <div className="section-intro">
+        {errors.length > 0 && (
+          <section className="notice error-notice" role="alert">
+            <strong>Some dashboard data could not be loaded.</strong>
+            {errors.map((error) => <p key={error}>{error}</p>)}
+            <button onClick={() => loadDashboard(true)}>Try again</button>
+          </section>
+        )}
+
+        <section className="section-block">
+          <div className="section-heading">
             <div>
-              <p className="overline">THE BIG PICTURE</p>
+              <span className="section-kicker">THE BIG PICTURE</span>
               <h2>Your numbers, at a glance.</h2>
             </div>
-            <span className="data-chip">
-              <span className="live-dot" /> LIVE DATA
+            <span className="live-label">
+              <span className="status-dot" /> LIVE DATA
             </span>
           </div>
 
-          <div className="stat-grid">
-            <article className="stat-card stat-featured">
-              <div className="stat-top">
-                <span>Total spending</span>
-                <span className="stat-symbol">₹</span>
-              </div>
-              <h3>{loading && !summary ? "…" : money(total)}</h3>
-              <div className="stat-bottom">
-                <span>Recorded expenses</span>
-                <span className="stat-arrow">↗</span>
-              </div>
-            </article>
-
-            <article className="stat-card">
-              <div className="stat-top">
-                <span>Transactions</span>
-                <span className="stat-symbol">#</span>
-              </div>
-              <h3>{loading && !summary ? "…" : number(transactions)}</h3>
-              <div className="stat-bottom">
-                <span>Recorded entries</span>
-                <span className="stat-arrow">↗</span>
-              </div>
-            </article>
-
-            <article className="stat-card">
-              <div className="stat-top">
-                <span>Average transaction</span>
-                <span className="stat-symbol">≈</span>
-              </div>
-              <h3>{loading && !summary ? "…" : money(average)}</h3>
-              <div className="stat-bottom">
-                <span>Per recorded transaction</span>
-                <span className="stat-arrow">↗</span>
-              </div>
-            </article>
-
-            <article className="stat-card">
-              <div className="stat-top">
-                <span>Categories</span>
-                <span className="stat-symbol">◫</span>
-              </div>
-              <h3>{number(categories.length)}</h3>
-              <div className="stat-bottom">
-                <span>Expense groups</span>
-                <span className="stat-arrow">↗</span>
-              </div>
-            </article>
+          <div className="metrics-grid">
+            <MetricCard
+              label="Total spending"
+              value={loading ? "Loading…" : formatMoney(totalSpending)}
+              detail="Recorded expenses"
+              icon="₹"
+            />
+            <MetricCard
+              label="Transactions"
+              value={loading ? "—" : transactionCount.toLocaleString("en-IN")}
+              detail="Transactions recorded"
+              icon="↗"
+            />
+            <MetricCard
+              label="Average transaction"
+              value={loading ? "—" : formatMoney(averageSpending)}
+              detail="Average per transaction"
+              icon="∅"
+            />
+            <MetricCard
+              label="Categories"
+              value={loading ? "—" : categoryCount}
+              detail="Spending categories returned"
+              icon="▦"
+            />
           </div>
         </section>
 
-        <section className="analysis-layout" id="categories">
-          <article className="content-card category-card">
-            <div className="card-heading">
+        <section className="content-grid">
+          <article className="panel category-panel" id="categories">
+            <div className="panel-heading">
               <div>
-                <p className="overline">WHERE IT GOES</p>
+                <span className="section-kicker">WHERE IT GOES</span>
                 <h2>Spending by category</h2>
-                <p className="muted-copy">
-                  Compare recorded totals across expense groups.
-                </p>
               </div>
-              <span className="round-decoration">↗</span>
+              <span className="panel-icon">↗</span>
             </div>
 
-            {loading && categories.length === 0 ? (
-              <p className="empty-copy">Loading category data…</p>
+            {loading ? (
+              <EmptyState>Loading category data…</EmptyState>
             ) : categories.length === 0 ? (
-              <p className="empty-copy">No category records returned.</p>
+              <EmptyState>
+                No category data returned. Refresh to try again.
+              </EmptyState>
             ) : (
-              <div className="category-bars">
+              <div className="category-list">
                 {categories.map((item, index) => {
-                  const amount = categoryAmount(item);
-                  const percent = (amount / maxCategory) * 100;
+                  const amount = getCategoryAmount(item);
+                  const percentage =
+                    categoryTotal > 0 ? (amount / categoryTotal) * 100 : 0;
 
                   return (
-                    <div className="category-entry" key={`${categoryName(item)}-${index}`}>
-                      <div className="category-entry-top">
-                        <span className="category-number">
-                          {String(index + 1).padStart(2, "0")}
+                    <div
+                      className="category-item"
+                      key={`${getCategoryName(item)}-${index}`}
+                    >
+                      <div className="category-line">
+                        <span className="category-name">
+                          <span className={`category-dot color-${index % 5}`} />
+                          {getCategoryName(item)}
                         </span>
-                        <span className="category-entry-name">{categoryName(item)}</span>
-                        <strong>{money(amount)}</strong>
+                        <strong>{formatMoney(amount)}</strong>
                       </div>
-                      <div className="bar-rail">
+                      <div
+                        className="progress-track"
+                        role="progressbar"
+                        aria-label={`${getCategoryName(item)} share`}
+                        aria-valuenow={Math.round(percentage)}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                      >
                         <div
-                          className={`bar-fill bar-color-${index % 5}`}
-                          style={{ width: `${percent}%` }}
+                          className={`progress-fill fill-${index % 5}`}
+                          style={{ width: `${Math.min(percentage, 100)}%` }}
                         />
+                      </div>
+                      <div className="category-percent">
+                        {percentage.toFixed(1)}% of returned category total
                       </div>
                     </div>
                   );
                 })}
               </div>
             )}
-
-            <div className="category-total">
-              <span>Total of displayed categories</span>
-              <strong>{money(categoryTotal)}</strong>
-            </div>
           </article>
 
-          <article className="content-card insight-card" id="insights">
-            <div className="card-heading">
+          <article className="panel insights-panel" id="insights">
+            <div className="panel-heading">
               <div>
-                <p className="overline">PATTERN DETECTION</p>
-                <h2>Spending signals</h2>
-                <p className="muted-copy">
-                  Results returned by the anomaly analysis API.
+                <span className="section-kicker">PATTERN DETECTION</span>
+                <h2>Unusual spending insights</h2>
+              </div>
+              <span className="panel-icon">⌁</span>
+            </div>
+
+            <div className="insight-summary">
+              <span className="insight-check">✓</span>
+              <div>
+                <strong>
+                  {loading ? "Checking transactions…" :
+                    anomalies.length ? `${anomalies.length} flagged record(s)` :
+                    "No unusual transactions returned"}
+                </strong>
+                <p>
+                  {loading
+                    ? "Waiting for the analysis service."
+                    : anomalies.length
+                      ? "Review the flagged records below."
+                      : "The API returned no unusual transactions."}
                 </p>
               </div>
-              <span className="signal-icon">⌁</span>
             </div>
 
-            <div className="signal-count">
-              <span className="signal-count-number">{number(anomalies.length)}</span>
-              <span className="signal-count-label">
-                unusual transaction{anomalies.length === 1 ? "" : "s"} returned
-              </span>
-            </div>
-
-            {loading && anomalies.length === 0 ? (
-              <p className="empty-copy">Checking spending signals…</p>
-            ) : anomalies.length === 0 ? (
-              <div className="no-signals">
-                <span className="check-mark">✓</span>
-                <div>
-                  <strong>No unusual transactions returned</strong>
-                  <p>The current analysis returned no anomaly records.</p>
-                </div>
-              </div>
-            ) : (
-              <div className="signal-list">
-                {anomalies.slice(0, 8).map((item, index) => (
-                  <div className="signal-row" key={index}>
-                    <span className="signal-alert">!</span>
-                    <div>
-                      <strong>
-                        {item.description ?? item.category_name ?? item.category ?? `Transaction ${index + 1}`}
-                      </strong>
-                      <span>
-                        {item.full_date ?? item.date ?? item.transaction_date ?? "Date not provided"}
-                      </span>
+            {anomalies.length > 0 && (
+              <div className="anomaly-list">
+                {anomalies.slice(0, 6).map((item, index) => (
+                  <div
+                    className="anomaly-item"
+                    key={item.transaction_id ?? item.id ?? index}
+                  >
+                    <span className="anomaly-symbol">!</span>
+                    <div className="anomaly-copy">
+                      <strong>{getAnomalyDescription(item)}</strong>
+                      <small>
+                        {item.full_date ?? item.date ?? item.transaction_date ?? "Date unavailable"}
+                      </small>
                     </div>
-                    <b>{money(item.amount ?? item.total_spending ?? 0)}</b>
+                    <strong className="anomaly-amount">
+                      {getAnomalyAmount(item) !== undefined
+                        ? formatMoney(getAnomalyAmount(item))
+                        : "Review"}
+                    </strong>
                   </div>
                 ))}
               </div>
             )}
 
-            <div className="insight-foot">
-              <span>MINING OUTPUT</span>
-              <span>SMARTSPEND / 01</span>
+            <div className="privacy-note">
+              <span>✳</span>
+              Insights depend on the records returned by your analysis API.
             </div>
           </article>
         </section>
 
-        <section className="olap-section" id="analytics">
+        <section className="olap-section" id="olap">
           <div className="olap-heading">
             <div>
-              <p className="overline">MULTIDIMENSIONAL EXPLORATION</p>
-              <h2>The OLAP laboratory.</h2>
+              <span className="section-kicker">DATA WAREHOUSE TOOLKIT</span>
+              <h2>Explore your data.</h2>
               <p>
-                Switch between aggregation, year filtering, dimensional
-                filtering, and cross-category comparison.
+                Run OLAP operations to inspect your spending from different
+                analytical perspectives.
               </p>
             </div>
+            <div className="olap-stamp">DWM<br />LAB / 01</div>
+          </div>
 
-            <div className="year-picker">
-              <label htmlFor="slice-year">SLICE YEAR</label>
-              <select
-                id="slice-year"
-                value={selectedYear}
-                onChange={(event) => setSelectedYear(event.target.value)}
+          <div className="olap-controls">
+            {[
+              { id: "roll-up", title: "Roll-up", subtitle: "Summarize data" },
+              { id: "slice", title: "Slice", subtitle: "Filter by year" },
+              { id: "dice", title: "Dice", subtitle: "Multidimensional view" },
+              { id: "pivot", title: "Pivot", subtitle: "Reorient the data" },
+            ].map((item, index) => (
+              <button
+                key={item.id}
+                className={`olap-card ${operation === item.id ? "selected" : ""}`}
+                onClick={() => {
+                  setOperation(item.id);
+                  setOlapRows([]);
+                  setOlapError("");
+                  setOlapMessage("");
+                }}
+                aria-pressed={operation === item.id}
               >
-                {Array.from({ length: 10 }, (_, index) =>
-                  String(new Date().getFullYear() - index)
-                ).map((year) => (
-                  <option key={year} value={year}>{year}</option>
-                ))}
-              </select>
+                <span className="olap-number">0{index + 1}</span>
+                <strong>{item.title}</strong>
+                <small>{item.subtitle}</small>
+                <span className="olap-arrow">↗</span>
+              </button>
+            ))}
+          </div>
+
+          {operation === "slice" && (
+            <div className="year-control">
+              <label htmlFor="slice-year">Filter year</label>
+              <input
+                id="slice-year"
+                type="number"
+                min="2000"
+                max="2100"
+                value={year}
+                onChange={(event) => setYear(event.target.value)}
+              />
             </div>
-          </div>
+          )}
 
-          <div className="olap-options">
+          <div className="run-row">
+            <div>
+              <strong>{operation.toUpperCase()} operation</strong>
+              <p>
+                {operation === "slice"
+                  ? `Selected year: ${year}`
+                  : "Execute the selected operation against the backend."}
+              </p>
+            </div>
             <button
-              className={`olap-option ${olapOperation === "roll-up" ? "chosen" : ""}`}
-              onClick={() => loadOlap("roll-up")}
-              disabled={olapLoading}
-              type="button"
+              className="run-button"
+              onClick={runOlap}
+              disabled={olapLoading || (operation === "slice" && !year)}
             >
-              <span className="operation-index">01</span>
-              <span className="operation-name">Roll-up</span>
-              <span className="operation-description">Summarize by time levels</span>
-              <span className="operation-arrow">↗</span>
-            </button>
-
-            <button
-              className={`olap-option ${olapOperation === "slice" ? "chosen" : ""}`}
-              onClick={() => loadOlap("slice")}
-              disabled={olapLoading}
-              type="button"
-            >
-              <span className="operation-index">02</span>
-              <span className="operation-name">Slice</span>
-              <span className="operation-description">Focus on one year</span>
-              <span className="operation-arrow">↗</span>
-            </button>
-
-            <button
-              className={`olap-option ${olapOperation === "dice" ? "chosen" : ""}`}
-              onClick={() => loadOlap("dice")}
-              disabled={olapLoading}
-              type="button"
-            >
-              <span className="operation-index">03</span>
-              <span className="operation-name">Dice</span>
-              <span className="operation-description">Filter multiple dimensions</span>
-              <span className="operation-arrow">↗</span>
-            </button>
-
-            <button
-              className={`olap-option ${olapOperation === "pivot" ? "chosen" : ""}`}
-              onClick={() => loadOlap("pivot")}
-              disabled={olapLoading}
-              type="button"
-            >
-              <span className="operation-index">04</span>
-              <span className="operation-name">Pivot</span>
-              <span className="operation-description">Compare category totals</span>
-              <span className="operation-arrow">↗</span>
+              {olapLoading ? "Running…" : "Run operation →"}
             </button>
           </div>
 
-          {(olapOperation || olapLoading || olapError) && (
-            <div className="olap-output">
-              <div className="output-heading">
-                <div>
-                  <p className="overline">QUERY OUTPUT</p>
-                  <h3>{operationLabels[olapOperation] || "Analysis results"}</h3>
-                </div>
-                <button
-                  className="output-clear"
-                  type="button"
-                  onClick={() => {
-                    setOlapOperation("");
-                    setOlapResults([]);
-                    setOlapError("");
-                  }}
-                >
-                  Clear ×
-                </button>
+          {olapError && (
+            <div className="notice error-notice" role="alert">
+              {olapError}
+            </div>
+          )}
+
+          {olapMessage && !olapError && (
+            <div className="result-message">{olapMessage}</div>
+          )}
+
+          {olapRows.length > 0 && (
+            <div className="results-panel">
+              <div className="results-heading">
+                <h3>Operation results</h3>
+                <span>{olapRows.length} row(s)</span>
               </div>
-
-              {olapLoading && <p className="empty-copy">Running analysis…</p>}
-              {olapError && <div className="alert-box">{olapError}</div>}
-
-              {!olapLoading && !olapError && olapResults.length === 0 && (
-                <p className="empty-copy">No records returned for this operation.</p>
-              )}
-
-              {!olapLoading && !olapError && olapResults.length > 0 && (
-                <>
-                  <p className="result-count">
-                    {number(olapResults.length)} ROWS RETURNED
-                  </p>
-                  <div className="responsive-table">
-                    <table className="result-table">
-                      <thead>
-                        <tr>
-                          {columns.map((key) => (
-                            <th key={key}>
-                              {key.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase())}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {olapResults.map((row, index) => (
-                          <tr key={index}>
-                            {columns.map((key) => (
-                              <td key={key}>{formatCell(key, row[key])}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
+              <DataTable rows={olapRows} />
             </div>
           )}
         </section>
-
-        <footer className="spend-footer">
-          <a className="footer-brand" href="#home">smartspend.</a>
-          <span>PERSONAL FINANCE ANALYTICS</span>
-          <a href="#home">Back to top ↑</a>
-        </footer>
       </main>
+
+      <footer className="footer">
+        <a className="footer-brand" href="#dashboard">smartspend<span>®</span></a>
+        <span>Personal finance · Data warehouse · Analytics</span>
+        <a href="#dashboard">Back to top ↑</a>
+      </footer>
     </div>
   );
 }
-
-export default App;
