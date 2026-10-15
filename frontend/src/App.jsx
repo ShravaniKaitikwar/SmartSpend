@@ -1,49 +1,135 @@
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  Legend,
+  BarChart,
+  Bar,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  AreaChart,
+  Area,
+} from "recharts";
 import "./App.css";
 
 const API_BASE = "https://smartspend-backend-iu60.onrender.com";
 
-const formatMoney = (value) =>
+const CHART_COLORS = [
+  "#245b42",
+  "#a8c95c",
+  "#e1b86b",
+  "#7395b5",
+  "#c7867c",
+  "#8c7ab8",
+  "#55a6a0",
+  "#d18b48",
+];
+
+const money = (value) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   }).format(Number(value) || 0);
 
-const getRows = (response) => {
-  if (Array.isArray(response)) return response;
-  if (Array.isArray(response?.data)) return response.data;
-  if (Array.isArray(response?.categories)) return response.categories;
-  if (Array.isArray(response?.anomalies)) return response.anomalies;
-  if (Array.isArray(response?.unusual_transactions))
-    return response.unusual_transactions;
-  return [];
-};
+const number = (value) =>
+  new Intl.NumberFormat("en-IN").format(Number(value) || 0);
 
-async function apiRequest(path) {
+async function api(path) {
   const response = await fetch(`${API_BASE}${path}`);
   const body = await response.json().catch(() => ({}));
 
   if (!response.ok) {
     throw new Error(
-      body.detail || body.message || `Request failed (${response.status})`
+      body.detail || body.message || `API request failed (${response.status})`
     );
   }
 
   return body;
 }
 
-function MetricCard({ label, value, detail, icon }) {
+function rowsFrom(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.rows)) return value.rows;
+  if (Array.isArray(value?.categories)) return value.categories;
+  if (Array.isArray(value?.anomalies)) return value.anomalies;
+  if (Array.isArray(value?.unusual_transactions))
+    return value.unusual_transactions;
+  return [];
+}
+
+function categoryName(item) {
+  return String(
+    item.category_name ?? item.category ?? item.name ?? "Other"
+  );
+}
+
+function categoryAmount(item) {
+  return Number(
+    item.total_spending ??
+      item.total_amount ??
+      item.amount ??
+      item.total ??
+      item.sum ??
+      0
+  );
+}
+
+function chartDateLabel(item) {
   return (
-    <article className="metric-card">
-      <div className="metric-top">
-        <span className="metric-label">{label}</span>
-        <span className="metric-icon">{icon}</span>
+    item.month_name ??
+    item.monthName ??
+    item.month ??
+    item.full_date ??
+    item.date ??
+    item.period ??
+    item.label ??
+    item.year_month ??
+    null
+  );
+}
+
+function chartValue(item) {
+  return Number(
+    item.total_spending ??
+      item.total_amount ??
+      item.monthly_spending ??
+      item.total_expenses ??
+      item.amount ??
+      item.total ??
+      item.sum ??
+      0
+  );
+}
+
+function StatCard({ title, value, caption, symbol }) {
+  return (
+    <article className="stat-card">
+      <div className="stat-card-top">
+        <span>{title}</span>
+        <span className="stat-symbol">{symbol}</span>
       </div>
-      <div className="metric-value">{value}</div>
-      <div className="metric-detail">{detail}</div>
+      <strong className="stat-value">{value}</strong>
+      <span className="stat-caption">{caption}</span>
     </article>
+  );
+}
+
+function PanelHeading({ eyebrow, title, extra }) {
+  return (
+    <div className="panel-heading">
+      <div>
+        <span className="eyebrow">{eyebrow}</span>
+        <h2>{title}</h2>
+      </div>
+      {extra}
+    </div>
   );
 }
 
@@ -51,27 +137,35 @@ function EmptyState({ children }) {
   return <div className="empty-state">{children}</div>;
 }
 
-function DataTable({ rows }) {
+function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+
+  return (
+    <div className="chart-tooltip">
+      {label && <strong>{label}</strong>}
+      {payload.map((entry, index) => (
+        <div key={`${entry.name}-${index}`}>
+          <span
+            className="tooltip-dot"
+            style={{ background: entry.color || entry.fill }}
+          />
+          <span>{entry.name || "Spending"}: </span>
+          <strong>{money(entry.value)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ResultsTable({ rows }) {
   if (!rows.length) {
-    return <EmptyState>No records to display for this operation.</EmptyState>;
+    return <EmptyState>No rows were returned for this operation.</EmptyState>;
   }
 
   const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
 
-  const displayValue = (key, value) => {
-    if (value === null || value === undefined || value === "") return "—";
-    if (
-      typeof value === "number" &&
-      /amount|spending|total|average|expense|sum/i.test(key)
-    ) {
-      return formatMoney(value);
-    }
-    if (typeof value === "object") return JSON.stringify(value);
-    return String(value);
-  };
-
   return (
-    <div className="table-wrap">
+    <div className="table-scroll">
       <table>
         <thead>
           <tr>
@@ -83,9 +177,24 @@ function DataTable({ rows }) {
         <tbody>
           {rows.map((row, index) => (
             <tr key={row.transaction_id ?? row.id ?? index}>
-              {columns.map((column) => (
-                <td key={column}>{displayValue(column, row[column])}</td>
-              ))}
+              {columns.map((column) => {
+                const value = row[column];
+                const isMoney =
+                  typeof value === "number" &&
+                  /amount|spending|expense|total|sum/i.test(column);
+
+                return (
+                  <td key={column}>
+                    {value === null || value === undefined
+                      ? "—"
+                      : isMoney
+                        ? money(value)
+                        : typeof value === "object"
+                          ? JSON.stringify(value)
+                          : String(value)}
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>
@@ -98,6 +207,7 @@ export default function App() {
   const [summary, setSummary] = useState(null);
   const [categories, setCategories] = useState([]);
   const [anomalies, setAnomalies] = useState([]);
+  const [monthlyRows, setMonthlyRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [errors, setErrors] = useState([]);
@@ -107,16 +217,17 @@ export default function App() {
   const [olapRows, setOlapRows] = useState([]);
   const [olapLoading, setOlapLoading] = useState(false);
   const [olapError, setOlapError] = useState("");
-  const [olapMessage, setOlapMessage] = useState("");
+  const [olapDescription, setOlapDescription] = useState("");
 
-  const loadDashboard = useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
+  const loadDashboard = useCallback(async (refresh = false) => {
+    if (refresh) setRefreshing(true);
     else setLoading(true);
 
     const results = await Promise.allSettled([
-      apiRequest("/api/summary"),
-      apiRequest("/api/categories"),
-      apiRequest("/api/mining/anomalies"),
+      api("/api/summary"),
+      api("/api/categories"),
+      api("/api/mining/anomalies"),
+      api("/api/olap/roll-up"),
     ]);
 
     const nextErrors = [];
@@ -128,15 +239,21 @@ export default function App() {
     }
 
     if (results[1].status === "fulfilled") {
-      setCategories(getRows(results[1].value));
+      setCategories(rowsFrom(results[1].value));
     } else {
       nextErrors.push(`Categories: ${results[1].reason.message}`);
     }
 
     if (results[2].status === "fulfilled") {
-      setAnomalies(getRows(results[2].value));
+      setAnomalies(rowsFrom(results[2].value));
     } else {
       nextErrors.push(`Insights: ${results[2].reason.message}`);
+    }
+
+    if (results[3].status === "fulfilled") {
+      setMonthlyRows(rowsFrom(results[3].value));
+    } else {
+      setMonthlyRows([]);
     }
 
     setErrors(nextErrors);
@@ -144,46 +261,21 @@ export default function App() {
     setRefreshing(false);
   }, []);
 
-  const runOlap = useCallback(async () => {
-    setOlapLoading(true);
-    setOlapError("");
-    setOlapMessage("");
-    setOlapRows([]);
-
-    try {
-      let path = `/api/olap/${operation}`;
-
-      if (operation === "slice") {
-        path += `?year=${encodeURIComponent(year)}`;
-      }
-
-      const result = await apiRequest(path);
-      const rows = getRows(result);
-
-      setOlapRows(rows);
-      setOlapMessage(
-        result.description ||
-          result.message ||
-          `${operation.toUpperCase()} completed.`
-      );
-
-      if (!rows.length && !result.description && !result.message) {
-        setOlapMessage(
-          "The API responded, but returned no rows in a recognized data array."
-        );
-      }
-    } catch (error) {
-      setOlapError(
-        `${error.message}. Check the API response and required parameters for this operation.`
-      );
-    } finally {
-      setOlapLoading(false);
-    }
-  }, [operation, year]);
-
   useEffect(() => {
     loadDashboard();
   }, [loadDashboard]);
+
+  const categoryChart = useMemo(
+    () =>
+      categories
+        .map((item) => ({
+          name: categoryName(item),
+          amount: categoryAmount(item),
+        }))
+        .filter((item) => Number.isFinite(item.amount) && item.amount >= 0)
+        .sort((a, b) => b.amount - a.amount),
+    [categories]
+  );
 
   const totalSpending = Number(
     summary?.total_spending ?? summary?.total_expenses ?? 0
@@ -198,41 +290,63 @@ export default function App() {
       (transactionCount ? totalSpending / transactionCount : 0)
   );
 
-  const categoryCount = categories.length;
-
-  const getCategoryName = (item) =>
-    item.category_name ?? item.category ?? item.name ?? "Other";
-
-  const getCategoryAmount = (item) =>
-    Number(
-      item.total_spending ??
-        item.total_amount ??
-        item.amount ??
-        item.total ??
-        item.sum ??
-        0
-    );
-
-  const categoryTotal = categories.reduce(
-    (total, item) => total + getCategoryAmount(item),
+  const categoryTotal = categoryChart.reduce(
+    (total, item) => total + item.amount,
     0
   );
 
-  const getAnomalyDescription = (item) =>
-    item.description ??
-    item.reason ??
-    item.transaction_description ??
-    item.category_name ??
-    item.category ??
-    "Unusual transaction";
+  const monthlyChart = useMemo(() => {
+    const parsed = monthlyRows
+      .map((item) => ({
+        label: chartDateLabel(item),
+        amount: chartValue(item),
+      }))
+      .filter(
+        (item) =>
+          item.label !== null &&
+          item.label !== undefined &&
+          String(item.label).trim() !== "" &&
+          Number.isFinite(item.amount)
+      );
 
-  const getAnomalyAmount = (item) =>
-    item.amount ?? item.total_amount ?? item.spending;
+    const looksMonthly = parsed.some((item) =>
+      /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|month|202\d[-/]/i.test(
+        String(item.label)
+      )
+    );
+
+    return looksMonthly ? parsed : [];
+  }, [monthlyRows]);
+
+  const runOlap = useCallback(async () => {
+    setOlapLoading(true);
+    setOlapError("");
+    setOlapDescription("");
+    setOlapRows([]);
+
+    try {
+      let path = `/api/olap/${operation}`;
+
+      if (operation === "slice") {
+        path += `?year=${encodeURIComponent(year)}`;
+      }
+
+      const result = await api(path);
+      setOlapRows(rowsFrom(result));
+      setOlapDescription(
+        result?.description ?? result?.message ?? `${operation} response received.`
+      );
+    } catch (error) {
+      setOlapError(error.message);
+    } finally {
+      setOlapLoading(false);
+    }
+  }, [operation, year]);
 
   return (
-    <div className="app-shell" id="dashboard">
+    <div className="app-shell" id="top">
       <header className="topbar">
-        <a className="brand" href="#dashboard" aria-label="SmartSpend home">
+        <a className="brand" href="#top">
           <span className="brand-mark">S</span>
           <span>
             <strong>smartspend</strong>
@@ -241,8 +355,8 @@ export default function App() {
         </a>
 
         <nav className="nav-links" aria-label="Main navigation">
-          <a className="active" href="#overview">Overview</a>
-          <a href="#categories">Categories</a>
+          <a href="#overview">Overview</a>
+          <a href="#charts">Charts</a>
           <a href="#insights">Insights</a>
           <a href="#olap">OLAP Lab</a>
         </nav>
@@ -259,20 +373,20 @@ export default function App() {
       <main>
         <section className="hero" id="overview">
           <div className="hero-copy">
-            <div className="eyebrow">
+            <span className="hero-eyebrow">
               <span className="status-dot" />
               YOUR MONEY, IN PERSPECTIVE
-            </div>
+            </span>
             <h1>
               Make every
               <br />
               rupee <span>count.</span>
             </h1>
             <p>
-              A clearer view of your spending habits, category patterns,
-              and historical financial activity.
+              Understand spending patterns, explore category distribution,
+              and make better-informed financial decisions.
             </p>
-            <a className="hero-link" href="#categories">
+            <a className="hero-link" href="#charts">
               Explore your data <span>↗</span>
             </a>
           </div>
@@ -282,17 +396,14 @@ export default function App() {
             <div className="orbit orbit-two" />
             <div className="orbit orbit-three" />
             <div className="hero-coin">₹</div>
-            <span className="art-label art-label-one">TRACK</span>
-            <span className="art-label art-label-two">LEARN</span>
-            <span className="art-label art-label-three">GROW</span>
-            <div className="art-dot dot-one" />
-            <div className="art-dot dot-two" />
-            <div className="art-dot dot-three" />
+            <span className="art-label label-one">TRACK</span>
+            <span className="art-label label-two">LEARN</span>
+            <span className="art-label label-three">GROW</span>
           </div>
 
           <div className="hero-footer">
             <span>SMARTSPEND ANALYTICS</span>
-            <span>01 / OVERVIEW</span>
+            <span>DATA WAREHOUSE PROJECT</span>
           </div>
         </section>
 
@@ -307,166 +418,352 @@ export default function App() {
         <section className="section-block">
           <div className="section-heading">
             <div>
-              <span className="section-kicker">THE BIG PICTURE</span>
+              <span className="eyebrow">THE BIG PICTURE</span>
               <h2>Your numbers, at a glance.</h2>
             </div>
             <span className="live-label">
-              <span className="status-dot" /> LIVE DATA
+              <span className="status-dot" /> LIVE API DATA
             </span>
           </div>
 
-          <div className="metrics-grid">
-            <MetricCard
-              label="Total spending"
-              value={loading ? "Loading…" : formatMoney(totalSpending)}
-              detail="Recorded expenses"
-              icon="₹"
+          <div className="stats-grid">
+            <StatCard
+              title="Total spending"
+              value={loading ? "Loading…" : money(totalSpending)}
+              caption="Recorded expenses"
+              symbol="₹"
             />
-            <MetricCard
-              label="Transactions"
-              value={loading ? "—" : transactionCount.toLocaleString("en-IN")}
-              detail="Transactions recorded"
-              icon="↗"
+            <StatCard
+              title="Transactions"
+              value={loading ? "—" : number(transactionCount)}
+              caption="Recorded transactions"
+              symbol="↗"
             />
-            <MetricCard
-              label="Average transaction"
-              value={loading ? "—" : formatMoney(averageSpending)}
-              detail="Average per transaction"
-              icon="∅"
+            <StatCard
+              title="Average transaction"
+              value={loading ? "—" : money(averageSpending)}
+              caption="Average per transaction"
+              symbol="∅"
             />
-            <MetricCard
-              label="Categories"
-              value={loading ? "—" : categoryCount}
-              detail="Spending categories returned"
-              icon="▦"
+            <StatCard
+              title="Categories"
+              value={loading ? "—" : number(categoryChart.length)}
+              caption="Categories returned by API"
+              symbol="▦"
             />
           </div>
         </section>
 
-        <section className="content-grid">
-          <article className="panel category-panel" id="categories">
-            <div className="panel-heading">
-              <div>
-                <span className="section-kicker">WHERE IT GOES</span>
-                <h2>Spending by category</h2>
-              </div>
-              <span className="panel-icon">↗</span>
+        <section className="charts-section" id="charts">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">VISUAL ANALYTICS</span>
+              <h2>See where it goes.</h2>
             </div>
+            <span className="section-note">Built from backend responses</span>
+          </div>
+
+          <div className="chart-grid">
+            <article className="panel chart-panel">
+              <PanelHeading
+                eyebrow="CATEGORY DISTRIBUTION"
+                title="Spending breakdown"
+                extra={<span className="chart-badge">DONUT</span>}
+              />
+
+              {loading ? (
+                <EmptyState>Loading category chart…</EmptyState>
+              ) : categoryChart.length === 0 || categoryTotal === 0 ? (
+                <EmptyState>
+                  No non-zero category totals were returned by the API.
+                </EmptyState>
+              ) : (
+                <>
+                  <div className="donut-wrap">
+                    <ResponsiveContainer width="100%" height={270}>
+                      <PieChart>
+                        <Pie
+                          data={categoryChart}
+                          dataKey="amount"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={70}
+                          outerRadius={105}
+                          paddingAngle={3}
+                          cornerRadius={4}
+                        >
+                          {categoryChart.map((entry, index) => (
+                            <Cell
+                              key={`${entry.name}-${index}`}
+                              fill={CHART_COLORS[index % CHART_COLORS.length]}
+                              stroke="none"
+                            />
+                          ))}
+                        </Pie>
+                        <Tooltip content={<ChartTooltip />} />
+                        <Legend
+                          verticalAlign="bottom"
+                          height={36}
+                          formatter={(value) => (
+                            <span className="legend-label">{value}</span>
+                          )}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="donut-center" aria-hidden="true">
+                      <span>CATEGORY TOTAL</span>
+                      <strong>{money(categoryTotal)}</strong>
+                    </div>
+                  </div>
+                  <div className="chart-footnote">
+                    Sum of the category amounts returned by the API.
+                  </div>
+                </>
+              )}
+            </article>
+
+            <article className="panel chart-panel">
+              <PanelHeading
+                eyebrow="CATEGORY COMPARISON"
+                title="Spending by category"
+                extra={<span className="chart-badge">BAR CHART</span>}
+              />
+
+              {loading ? (
+                <EmptyState>Loading category chart…</EmptyState>
+              ) : categoryChart.length === 0 ? (
+                <EmptyState>No category data is available to plot.</EmptyState>
+              ) : (
+                <div className="bar-chart-wrap">
+                  <ResponsiveContainer width="100%" height={310}>
+                    <BarChart
+                      data={categoryChart}
+                      margin={{ top: 8, right: 8, left: 4, bottom: 48 }}
+                    >
+                      <CartesianGrid
+                        stroke="#e9eee5"
+                        strokeDasharray="3 3"
+                        vertical={false}
+                      />
+                      <XAxis
+                        dataKey="name"
+                        interval={0}
+                        angle={-30}
+                        textAnchor="end"
+                        height={65}
+                        tick={{ fill: "#758477", fontSize: 10 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis
+                        width={65}
+                        tickFormatter={(value) => `₹${number(value)}`}
+                        tick={{ fill: "#758477", fontSize: 10 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Bar
+                        dataKey="amount"
+                        name="Spending"
+                        radius={[6, 6, 0, 0]}
+                        maxBarSize={48}
+                      >
+                        {categoryChart.map((entry, index) => (
+                          <Cell
+                            key={`${entry.name}-${index}`}
+                            fill={CHART_COLORS[index % CHART_COLORS.length]}
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </article>
+          </div>
+
+          <article className="panel monthly-panel">
+            <PanelHeading
+              eyebrow="TIME-BASED ANALYSIS"
+              title="Monthly spending trend"
+              extra={<span className="chart-badge">AREA CHART</span>}
+            />
 
             {loading ? (
-              <EmptyState>Loading category data…</EmptyState>
-            ) : categories.length === 0 ? (
+              <EmptyState>Loading monthly data…</EmptyState>
+            ) : monthlyChart.length === 0 ? (
               <EmptyState>
-                No category data returned. Refresh to try again.
+                The Roll-up endpoint did not return recognizable monthly
+                totals. This chart needs monthly data from the backend; no
+                values have been fabricated.
               </EmptyState>
             ) : (
-              <div className="category-list">
-                {categories.map((item, index) => {
-                  const amount = getCategoryAmount(item);
-                  const percentage =
-                    categoryTotal > 0 ? (amount / categoryTotal) * 100 : 0;
-
-                  return (
-                    <div
-                      className="category-item"
-                      key={`${getCategoryName(item)}-${index}`}
-                    >
-                      <div className="category-line">
-                        <span className="category-name">
-                          <span className={`category-dot color-${index % 5}`} />
-                          {getCategoryName(item)}
-                        </span>
-                        <strong>{formatMoney(amount)}</strong>
-                      </div>
-                      <div
-                        className="progress-track"
-                        role="progressbar"
-                        aria-label={`${getCategoryName(item)} share`}
-                        aria-valuenow={Math.round(percentage)}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                      >
-                        <div
-                          className={`progress-fill fill-${index % 5}`}
-                          style={{ width: `${Math.min(percentage, 100)}%` }}
-                        />
-                      </div>
-                      <div className="category-percent">
-                        {percentage.toFixed(1)}% of returned category total
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <ResponsiveContainer width="100%" height={290}>
+                <AreaChart
+                  data={monthlyChart}
+                  margin={{ top: 12, right: 15, left: 8, bottom: 5 }}
+                >
+                  <defs>
+                    <linearGradient id="spendingFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#6e9b55" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#6e9b55" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid
+                    stroke="#e9eee5"
+                    strokeDasharray="3 3"
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fill: "#758477", fontSize: 10 }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tickFormatter={(value) => `₹${number(value)}`}
+                    tick={{ fill: "#758477", fontSize: 10 }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip content={<ChartTooltip />} />
+                  <Area
+                    type="monotone"
+                    dataKey="amount"
+                    name="Monthly spending"
+                    stroke="#326847"
+                    strokeWidth={3}
+                    fill="url(#spendingFill)"
+                    activeDot={{ r: 5 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
             )}
           </article>
+        </section>
 
-          <article className="panel insights-panel" id="insights">
-            <div className="panel-heading">
-              <div>
-                <span className="section-kicker">PATTERN DETECTION</span>
-                <h2>Unusual spending insights</h2>
-              </div>
-              <span className="panel-icon">⌁</span>
-            </div>
+        <section className="content-grid">
+          <article className="panel" id="insights">
+            <PanelHeading
+              eyebrow="PATTERN DETECTION"
+              title="Unusual spending insights"
+              extra={<span className="chart-badge">MINING</span>}
+            />
 
             <div className="insight-summary">
               <span className="insight-check">✓</span>
               <div>
                 <strong>
-                  {loading ? "Checking transactions…" :
-                    anomalies.length ? `${anomalies.length} flagged record(s)` :
-                    "No unusual transactions returned"}
+                  {loading
+                    ? "Checking transactions…"
+                    : anomalies.length
+                      ? `${anomalies.length} flagged record(s)`
+                      : "No unusual transactions returned"}
                 </strong>
                 <p>
                   {loading
                     ? "Waiting for the analysis service."
                     : anomalies.length
-                      ? "Review the flagged records below."
-                      : "The API returned no unusual transactions."}
+                      ? "Review the records flagged by the backend."
+                      : "The anomaly endpoint returned no flagged records."}
                 </p>
               </div>
             </div>
 
             {anomalies.length > 0 && (
               <div className="anomaly-list">
-                {anomalies.slice(0, 6).map((item, index) => (
+                {anomalies.slice(0, 8).map((item, index) => (
                   <div
                     className="anomaly-item"
                     key={item.transaction_id ?? item.id ?? index}
                   >
                     <span className="anomaly-symbol">!</span>
                     <div className="anomaly-copy">
-                      <strong>{getAnomalyDescription(item)}</strong>
+                      <strong>
+                        {item.description ??
+                          item.reason ??
+                          item.category_name ??
+                          item.category ??
+                          "Unusual transaction"}
+                      </strong>
                       <small>
-                        {item.full_date ?? item.date ?? item.transaction_date ?? "Date unavailable"}
+                        {item.full_date ??
+                          item.date ??
+                          item.transaction_date ??
+                          "Date unavailable"}
                       </small>
                     </div>
                     <strong className="anomaly-amount">
-                      {getAnomalyAmount(item) !== undefined
-                        ? formatMoney(getAnomalyAmount(item))
-                        : "Review"}
+                      {item.amount !== undefined ? money(item.amount) : "Review"}
                     </strong>
                   </div>
                 ))}
               </div>
             )}
+          </article>
 
-            <div className="privacy-note">
-              <span>✳</span>
-              Insights depend on the records returned by your analysis API.
-            </div>
+          <article className="panel">
+            <PanelHeading
+              eyebrow="CATEGORY SUMMARY"
+              title="Top spending categories"
+              extra={<span className="chart-badge">{categoryChart.length} ITEMS</span>}
+            />
+
+            {loading ? (
+              <EmptyState>Loading categories…</EmptyState>
+            ) : categoryChart.length === 0 ? (
+              <EmptyState>No category data returned.</EmptyState>
+            ) : (
+              <div className="category-list">
+                {categoryChart.slice(0, 8).map((item, index) => {
+                  const percentage =
+                    categoryTotal > 0
+                      ? (item.amount / categoryTotal) * 100
+                      : 0;
+
+                  return (
+                    <div className="category-item" key={`${item.name}-${index}`}>
+                      <div className="category-line">
+                        <span>
+                          <span
+                            className="category-dot"
+                            style={{
+                              background:
+                                CHART_COLORS[index % CHART_COLORS.length],
+                            }}
+                          />
+                          {item.name}
+                        </span>
+                        <strong>{money(item.amount)}</strong>
+                      </div>
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{
+                            width: `${Math.min(percentage, 100)}%`,
+                            background:
+                              CHART_COLORS[index % CHART_COLORS.length],
+                          }}
+                        />
+                      </div>
+                      <small>{percentage.toFixed(1)}% of category total</small>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </article>
         </section>
 
         <section className="olap-section" id="olap">
           <div className="olap-heading">
             <div>
-              <span className="section-kicker">DATA WAREHOUSE TOOLKIT</span>
+              <span className="eyebrow">DATA WAREHOUSE TOOLKIT</span>
               <h2>Explore your data.</h2>
               <p>
-                Run OLAP operations to inspect your spending from different
-                analytical perspectives.
+                Execute analytical operations against the existing backend.
               </p>
             </div>
             <div className="olap-stamp">DWM<br />LAB / 01</div>
@@ -486,7 +783,7 @@ export default function App() {
                   setOperation(item.id);
                   setOlapRows([]);
                   setOlapError("");
-                  setOlapMessage("");
+                  setOlapDescription("");
                 }}
                 aria-pressed={operation === item.id}
               >
@@ -518,7 +815,7 @@ export default function App() {
               <p>
                 {operation === "slice"
                   ? `Selected year: ${year}`
-                  : "Execute the selected operation against the backend."}
+                  : "Run the selected OLAP operation."}
               </p>
             </div>
             <button
@@ -536,8 +833,8 @@ export default function App() {
             </div>
           )}
 
-          {olapMessage && !olapError && (
-            <div className="result-message">{olapMessage}</div>
+          {olapDescription && !olapError && (
+            <div className="result-message">{olapDescription}</div>
           )}
 
           {olapRows.length > 0 && (
@@ -546,16 +843,16 @@ export default function App() {
                 <h3>Operation results</h3>
                 <span>{olapRows.length} row(s)</span>
               </div>
-              <DataTable rows={olapRows} />
+              <ResultsTable rows={olapRows} />
             </div>
           )}
         </section>
       </main>
 
       <footer className="footer">
-        <a className="footer-brand" href="#dashboard">smartspend<span>®</span></a>
+        <a className="footer-brand" href="#top">smartspend<span>®</span></a>
         <span>Personal finance · Data warehouse · Analytics</span>
-        <a href="#dashboard">Back to top ↑</a>
+        <a href="#top">Back to top ↑</a>
       </footer>
     </div>
   );
