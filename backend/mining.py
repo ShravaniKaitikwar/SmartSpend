@@ -1,5 +1,5 @@
 
-import itertools
+import logging
 import math
 
 import pandas as pd
@@ -10,10 +10,12 @@ from sklearn.preprocessing import StandardScaler
 
 from database import engine
 
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
+
+# =========================================================
 # 1. ANOMALY DETECTION - ISOLATION FOREST
-# ---------------------------------------------------------
+# =========================================================
 
 def detect_unusual_spending():
     query = text("""
@@ -26,7 +28,8 @@ def detect_unusual_spending():
         JOIN dim_date d
             ON f.date_key = d.date_key
         JOIN dim_category c
-            ON f.category_key = c.category_key
+            ON f.category_id = c.category_id
+        WHERE f.amount IS NOT NULL
         ORDER BY d.full_date
     """)
 
@@ -39,7 +42,7 @@ def detect_unusual_spending():
             "transactions_analyzed": 0,
             "unusual_count": 0,
             "unusual_transactions": [],
-            "message": "No transactions available to analyze."
+            "message": "No transactions available to analyze.",
         }
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -52,80 +55,78 @@ def detect_unusual_spending():
             "transactions_analyzed": 0,
             "unusual_count": 0,
             "unusual_transactions": [],
-            "message": "No valid transactions available."
+            "message": "No valid transactions available.",
         }
 
-    # Log transformation reduces the effect of very large amounts.
-    df["log_amount"] = df["amount"].abs().apply(
-        lambda amount: math.log1p(amount)
-    )
+    # Feature 1: Log-transformed transaction amount.
+    df["log_amount"] = df["amount"].abs().map(math.log1p)
 
-    # Compare each transaction with its category's typical amount.
-    category_median = df.groupby("category")["amount"].transform("median")
+    # Feature 2: Deviation from the category's typical amount.
+    category_median = df.groupby("category")["amount"].transform(
+        lambda values: values.abs().median()
+    )
     df["amount_vs_category"] = (
-        df["amount"] - category_median
+        df["amount"].abs() - category_median
     ).abs()
 
-    # Transaction activity on the same calendar date.
+    # Feature 3: Number of transactions on the same date.
     df["transactions_same_day"] = (
-        df.groupby(df["date"].dt.date)["transaction_id"].transform("count")
+        df.groupby(df["date"].dt.date)["transaction_id"]
+        .transform("count")
     )
 
-    features = df[
-        [
-            "log_amount",
-            "amount_vs_category",
-            "transactions_same_day"
-        ]
-    ].replace([float("inf"), -float("inf")], 0).fillna(0)
+    feature_columns = [
+        "log_amount",
+        "amount_vs_category",
+        "transactions_same_day",
+    ]
 
-    # Fit the model on a reproducible sample if the dataset is very large.
-    # The transparent high-amount rule is still applied to all transactions.
-    max_model_rows = 100_000
+    features = (
+        df[feature_columns]
+        .replace([float("inf"), -float("inf")], 0)
+        .fillna(0)
+    )
+
+    # Fit Isolation Forest on a sample to control memory usage.
+    max_training_rows = 100_000
 
     if len(df) >= 5:
-        if len(df) > max_model_rows:
-            sample_indices = features.sample(
-                n=max_model_rows, random_state=42
-            ).index
-            model_features = features.loc[sample_indices]
+        if len(df) > max_training_rows:
+            training_features = features.sample(
+                n=max_training_rows,
+                random_state=42,
+            )
         else:
-            sample_indices = features.index
-            model_features = features
+            training_features = features
 
         model = IsolationForest(
             n_estimators=100,
             contamination=0.05,
             random_state=42,
-            n_jobs=-1
+            n_jobs=-1,
         )
-        model.fit(model_features)
 
-        df["model_anomaly"] = (
-            model.predict(features) == -1
-        )
-        # Predictions for rows outside the training sample are valid:
-        # Isolation Forest predicts on unseen rows after fitting.
+        model.fit(training_features)
+        df["model_anomaly"] = model.predict(features) == -1
     else:
         df["model_anomaly"] = False
 
-    # Robust statistical rule: high compared with the overall median.
-    median_amount = df["amount"].abs().median()
-    absolute_deviations = (df["amount"].abs() - median_amount).abs()
-    mad = absolute_deviations.median()
+    # Robust statistical threshold for unusually large amounts.
+    absolute_amount = df["amount"].abs()
+    median_amount = absolute_amount.median()
+    mad = (absolute_amount - median_amount).abs().median()
 
     if pd.notna(mad) and mad > 0:
         threshold = median_amount + 3 * 1.4826 * mad
     else:
         threshold = median_amount * 3
 
-    df["high_amount"] = df["amount"].abs() > threshold
+    df["high_amount"] = absolute_amount > threshold
 
-    # Repeated transaction amounts on the same date are review signals,
-    # not proof of fraud.
+    # Repeated amounts are review signals, not proof of fraud.
     df["repeated_same_day"] = df.duplicated(
         subset=["date", "amount"],
-        keep=False
+        keep=False,
     )
 
     df["is_unusual"] = (
@@ -138,25 +139,31 @@ def detect_unusual_spending():
 
     def explain(row):
         reasons = []
+
         if row["high_amount"]:
-            reasons.append("Unusually high amount")
+            reasons.append("Unusually high transaction amount")
+
         if row["model_anomaly"]:
             reasons.append("Isolation Forest anomaly")
+
         if row["repeated_same_day"]:
             reasons.append("Repeated amount on the same date")
+
         return "; ".join(reasons)
 
     unusual["reason"] = unusual.apply(explain, axis=1)
     unusual["date"] = unusual["date"].dt.strftime("%Y-%m-%d")
     unusual["amount"] = unusual["amount"].astype(float)
 
-    # Avoid returning thousands of records to the web frontend.
-    results = unusual.sort_values(
-        by="amount", key=lambda values: values.abs(), ascending=False
-    ).head(100)
+    # Return the largest unusual amounts first, capped at 100 results.
+    unusual = unusual.assign(
+        _absolute_amount=unusual["amount"].abs()
+    )
+    results = unusual.nlargest(100, "_absolute_amount")
+    results = results.drop(columns=["_absolute_amount"])
 
     return {
-        "technique": "Isolation Forest plus statistical rules",
+        "technique": "Isolation Forest with statistical rules",
         "transactions_analyzed": int(len(df)),
         "unusual_count": int(len(unusual)),
         "returned_count": int(len(results)),
@@ -164,15 +171,15 @@ def detect_unusual_spending():
             ["transaction_id", "date", "category", "amount", "reason"]
         ].to_dict(orient="records"),
         "note": (
-            "Alerts identify unusual patterns, not confirmed fraud. "
-            "Repeated amounts can be legitimate."
-        )
+            "Unusual patterns are not confirmed fraud. "
+            "Repeated amounts may be legitimate."
+        ),
     }
 
 
-# ---------------------------------------------------------
+# =========================================================
 # 2. CLUSTERING - K-MEANS CUSTOMER SEGMENTATION
-# ---------------------------------------------------------
+# =========================================================
 
 def cluster_customers():
     query = text("""
@@ -181,7 +188,7 @@ def cluster_customers():
             COUNT(*) AS transaction_count,
             AVG(ABS(f.amount)) AS average_amount,
             SUM(ABS(f.amount)) AS total_transaction_value,
-            COUNT(DISTINCT f.category_key) AS category_count
+            COUNT(DISTINCT f.category_id) AS category_count
         FROM fact_expenses f
         WHERE f.user_id IS NOT NULL
           AND f.amount IS NOT NULL
@@ -197,138 +204,98 @@ def cluster_customers():
             "technique": "K-Means clustering",
             "customers_analyzed": 0,
             "clusters": [],
-            "message": "Not enough customer data to cluster."
+            "message": "No customer data available for clustering.",
         }
 
     feature_columns = [
         "transaction_count",
         "average_amount",
         "total_transaction_value",
-        "category_count"
+        "category_count",
     ]
 
     df[feature_columns] = df[feature_columns].apply(
-        pd.to_numeric, errors="coerce"
+        pd.to_numeric,
+        errors="coerce",
     )
-    df = df.replace([float("inf"), -float("inf")], pd.NA)
-    df = df.dropna(subset=feature_columns).copy()
+
+    df = (
+        df.replace([float("inf"), -float("inf")], float("nan"))
+        .dropna(subset=feature_columns)
+        .copy()
+    )
 
     if len(df) < 3:
         return {
             "technique": "K-Means clustering",
             "customers_analyzed": int(len(df)),
             "clusters": [],
-            "message": "At least 3 valid customers are required."
+            "message": "At least 3 valid customers are required.",
         }
 
-    # Log transform skewed transaction features before scaling.
-    for column in feature_columns:
-        df[column] = df[column].clip(lower=0).apply(
-            lambda value: math.log1p(value)
-        )
+    original = df[feature_columns].copy()
+
+    # Transform skewed data, then standardize the features.
+    transformed = df[feature_columns].clip(lower=0).apply(
+        lambda column: column.map(math.log1p)
+    )
 
     scaler = StandardScaler()
-    scaled_features = scaler.fit_transform(df[feature_columns])
+    scaled_features = scaler.fit_transform(transformed)
 
     number_of_clusters = min(3, len(df))
 
     model = KMeans(
         n_clusters=number_of_clusters,
         random_state=42,
-        n_init=10
+        n_init=10,
     )
+
     df["cluster"] = model.fit_predict(scaled_features)
 
-    # Calculate interpretable summaries using original warehouse values.
-    # Reloading original values avoids reporting log-transformed numbers.
-    summary_query = text("""
-        SELECT
-            f.user_id,
-            COUNT(*) AS transaction_count,
-            AVG(ABS(f.amount)) AS average_amount,
-            SUM(ABS(f.amount)) AS total_transaction_value,
-            COUNT(DISTINCT f.category_key) AS category_count
-        FROM fact_expenses f
-        WHERE f.user_id IS NOT NULL
-          AND f.amount IS NOT NULL
-        GROUP BY f.user_id
-        HAVING COUNT(*) >= 2
-    """)
-
-    with engine.connect() as connection:
-        original = pd.read_sql(summary_query, connection)
-
-    original = original.set_index("user_id")
-    df["user_id"] = df["user_id"].astype(str)
-
-    # Match the user IDs and report the original-value summaries.
-    original.index = original.index.astype(str)
-    df = df.join(
-        original[[
-            "transaction_count",
-            "average_amount",
-            "total_transaction_value",
-            "category_count"
-        ]].add_suffix("_original"),
-        on="user_id"
-    )
-
     clusters = []
+
     for cluster_id in sorted(df["cluster"].unique()):
-        members = df[df["cluster"] == cluster_id]
-        original_values = members[
-            [
-                "transaction_count_original",
-                "average_amount_original",
-                "total_transaction_value_original",
-                "category_count_original"
-            ]
-        ]
+        positions = df.index[df["cluster"] == cluster_id]
+        members = original.loc[positions]
 
         clusters.append({
             "cluster": int(cluster_id),
             "customer_count": int(len(members)),
             "average_transactions": round(
-                float(original_values["transaction_count_original"].mean()), 2
+                float(members["transaction_count"].mean()), 2
             ),
             "average_transaction_amount": round(
-                float(original_values["average_amount_original"].mean()), 2
+                float(members["average_amount"].mean()), 2
             ),
             "average_total_transaction_value": round(
-                float(original_values["total_transaction_value_original"].mean()), 2
+                float(members["total_transaction_value"].mean()), 2
             ),
             "average_distinct_categories": round(
-                float(original_values["category_count_original"].mean()), 2
-            )
+                float(members["category_count"].mean()), 2
+            ),
         })
 
     return {
         "technique": "K-Means clustering",
         "customers_analyzed": int(len(df)),
         "number_of_clusters": int(number_of_clusters),
-        "features": [
-            "Transaction count",
-            "Average transaction amount",
-            "Total transaction value",
-            "Distinct categories"
-        ],
+        "features": feature_columns,
         "clusters": clusters,
         "note": (
-            "Clusters describe transaction behaviour; they do not label "
-            "customers as good, bad, or fraudulent."
-        )
+            "Clusters represent transaction behaviour, not customer "
+            "quality or confirmed fraud."
+        ),
     }
 
 
-# ---------------------------------------------------------
-# 3. FREQUENT PATTERN MINING - CATEGORY CO-OCCURRENCE
-# ---------------------------------------------------------
+# =========================================================
+# 3. FREQUENT PATTERN MINING - FP-GROWTH
+# =========================================================
 
 def frequent_patterns():
-    # Each basket represents the distinct categories used by one customer
-    # in one calendar month.
     query = text("""
-        SELECT
+        SELECT DISTINCT
             f.user_id,
             d.year,
             d.month,
@@ -337,10 +304,9 @@ def frequent_patterns():
         JOIN dim_date d
             ON f.date_key = d.date_key
         JOIN dim_category c
-            ON f.category_key = c.category_key
+            ON f.category_id = c.category_id
         WHERE f.user_id IS NOT NULL
           AND c.category_name IS NOT NULL
-        GROUP BY f.user_id, d.year, d.month, c.category_name
         ORDER BY f.user_id, d.year, d.month
     """)
 
@@ -349,100 +315,108 @@ def frequent_patterns():
 
     if df.empty:
         return {
-            "technique": "Frequent pattern mining",
+            "technique": "FP-Growth",
             "baskets_analyzed": 0,
             "patterns": [],
-            "message": "No category data available."
+            "message": "No category data available.",
         }
 
+    # One basket = distinct categories used by one customer in one month.
     df["basket_id"] = (
-        df["user_id"].astype(str) + "_"
-        + df["year"].astype(str) + "_"
+        df["user_id"].astype(str)
+        + "_"
+        + df["year"].astype(str)
+        + "_"
         + df["month"].astype(str)
     )
 
     baskets = (
         df.groupby("basket_id")["category"]
-        .apply(lambda categories: sorted(set(categories)))
+        .apply(lambda values: sorted(set(values)))
         .tolist()
     )
 
-    basket_count = len(baskets)
-
-    if basket_count < 2:
+    if len(baskets) < 2:
         return {
-            "technique": "Frequent pattern mining",
-            "baskets_analyzed": int(basket_count),
+            "technique": "FP-Growth",
+            "baskets_analyzed": int(len(baskets)),
             "patterns": [],
-            "message": "Not enough customer-month baskets."
+            "message": "Not enough customer-month baskets.",
         }
 
-    # Limit basket count to keep the hosted API responsive.
-    # The sample is deterministic.
+    # Sample deterministically if there are too many baskets.
     max_baskets = 20_000
+
     if len(baskets) > max_baskets:
         step = len(baskets) / max_baskets
         baskets = [
-            baskets[int(i * step)] for i in range(max_baskets)
+            baskets[int(i * step)]
+            for i in range(max_baskets)
         ]
 
-    sampled_count = len(baskets)
+    try:
+        from mlxtend.frequent_patterns import fpgrowth
+        from mlxtend.preprocessing import TransactionEncoder
+    except ImportError as exc:
+        logger.exception("FP-Growth dependency is missing")
+        raise RuntimeError(
+            "FP-Growth requires mlxtend. Add mlxtend to requirements.txt."
+        ) from exc
+
+    encoder = TransactionEncoder()
+    encoded_array = encoder.fit(baskets).transform(baskets)
+
+    basket_df = pd.DataFrame(
+        encoded_array,
+        columns=encoder.columns_,
+    )
+
     minimum_support = 0.02
-    minimum_count = max(2, math.ceil(minimum_support * sampled_count))
 
-    item_counts = {}
-    pair_counts = {}
-    triple_counts = {}
-
-    for basket in baskets:
-        unique_items = sorted(set(basket))
-
-        for item in unique_items:
-            item_counts[item] = item_counts.get(item, 0) + 1
-
-        # Pair and triple patterns are calculated only within each basket.
-        for pair in itertools.combinations(unique_items, 2):
-            pair_counts[pair] = pair_counts.get(pair, 0) + 1
-
-        for triple in itertools.combinations(unique_items, 3):
-            triple_counts[triple] = triple_counts.get(triple, 0) + 1
+    itemsets = fpgrowth(
+        basket_df,
+        min_support=minimum_support,
+        use_colnames=True,
+        max_len=3,
+    )
 
     patterns = []
 
-    for items, counts in [
-        (pair_counts, 2),
-        (triple_counts, 3)
-    ]:
-        for itemset, occurrence_count in items.items():
-            if occurrence_count < minimum_count:
-                continue
+    for _, row in itemsets.iterrows():
+        categories = sorted(list(row["itemsets"]))
 
-            patterns.append({
-                "categories": list(itemset),
-                "item_count": counts,
-                "occurrences": int(occurrence_count),
-                "support": round(occurrence_count / sampled_count, 4)
-            })
+        # Report combinations of two or three categories.
+        if len(categories) < 2:
+            continue
+
+        support = float(row["support"])
+
+        patterns.append({
+            "categories": categories,
+            "item_count": len(categories),
+            "support": round(support, 4),
+            "occurrences": int(round(support * len(baskets))),
+        })
 
     patterns.sort(
         key=lambda item: (
             item["support"],
             item["occurrences"],
-            item["item_count"]
         ),
-        reverse=True
+        reverse=True,
     )
 
     return {
-        "technique": "Frequent category pattern mining",
-        "basket_definition": "Distinct categories per customer per month",
-        "baskets_analyzed": int(sampled_count),
+        "technique": "FP-Growth",
+        "basket_definition": (
+            "Distinct categories per customer per month"
+        ),
+        "baskets_analyzed": int(len(baskets)),
         "minimum_support": minimum_support,
-        "minimum_occurrences": int(minimum_count),
         "pattern_count": int(len(patterns)),
         "patterns": patterns[:50],
         "note": (
-            "Patterns show categories occurring together in a customer-month. "
-            "They do not establish causation or prove fraud."
-        )
+            "Support shows how often categories occur together in the "
+            "defined baskets. It does not prove causation or fraud."
+        ),
     }
