@@ -30,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Demo fallback values, used only when a query fails.
+# Demo fallback values for the existing dashboard.
 DEMO_SUMMARY = {
     "transaction_count": 10,
     "total_spending": 6438.0,
@@ -72,15 +72,41 @@ DEMO_ANOMALIES = {
 }
 
 
+# ---------------------------------------------------------
+# BASIC ROUTES
+# ---------------------------------------------------------
+
 @app.get("/")
 def root():
-    return {"app": "SmartSpend API", "status": "running"}
+    return {
+        "app": "SmartSpend API",
+        "status": "running",
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "app": "SmartSpend"}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
 
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "app": "SmartSpend",
+        }
+
+    except Exception:
+        logger.exception("Health check database connection failed")
+        raise HTTPException(
+            status_code=503,
+            detail="API is running, but the database is unavailable.",
+        )
+
+
+# ---------------------------------------------------------
+# DASHBOARD SUMMARY
+# ---------------------------------------------------------
 
 @app.get("/api/summary")
 def get_summary():
@@ -108,6 +134,10 @@ def get_summary():
         return dict(DEMO_SUMMARY)
 
 
+# ---------------------------------------------------------
+# CATEGORY SUMMARY
+# ---------------------------------------------------------
+
 @app.get("/api/categories")
 def get_categories():
     try:
@@ -116,7 +146,8 @@ def get_categories():
                 c.category_name AS category,
                 COALESCE(SUM(f.amount), 0) AS total
             FROM fact_expenses f
-            JOIN dim_category c ON f.category_id = c.category_id
+            JOIN dim_category c
+                ON f.category_id = c.category_id
             GROUP BY c.category_name
             ORDER BY total DESC
         """)
@@ -141,6 +172,10 @@ def get_categories():
         ]
 
 
+# ---------------------------------------------------------
+# DATA MINING 1: ANOMALY DETECTION
+# ---------------------------------------------------------
+
 @app.get("/api/mining/anomalies")
 def get_anomalies():
     try:
@@ -151,11 +186,67 @@ def get_anomalies():
         return result
 
     except Exception:
-        logger.exception("Anomaly detection failed; using demo fallback")
-        return dict(DEMO_ANOMALIES)
+        logger.exception("Anomaly detection failed")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Anomaly detection failed. Check the mining code, "
+                "database schema, and server logs."
+            ),
+        )
 
 
-# ---------------- OLAP OPERATIONS ----------------
+# ---------------------------------------------------------
+# DATA MINING 2: K-MEANS CUSTOMER CLUSTERING
+# ---------------------------------------------------------
+
+@app.get("/api/mining/clusters")
+def get_customer_clusters():
+    try:
+        from mining import cluster_customers
+
+        result = cluster_customers()
+        result["data_source"] = "database"
+        return result
+
+    except Exception:
+        logger.exception("Customer clustering failed")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Customer clustering failed. Check the mining code, "
+                "database schema, and server logs."
+            ),
+        )
+
+
+# ---------------------------------------------------------
+# DATA MINING 3: FREQUENT PATTERN MINING
+# ---------------------------------------------------------
+
+@app.get("/api/mining/frequent-patterns")
+def get_frequent_patterns():
+    try:
+        from mining import frequent_patterns
+
+        result = frequent_patterns()
+        result["data_source"] = "database"
+        return result
+
+    except Exception:
+        logger.exception("Frequent pattern mining failed")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Frequent pattern mining failed. Check the mining code, "
+                "database schema, and server logs."
+            ),
+        )
+
+
+# ---------------------------------------------------------
+# OLAP 1: ROLL-UP
+# ---------------------------------------------------------
 
 @app.get("/api/olap/roll-up")
 def olap_roll_up():
@@ -165,6 +256,7 @@ def olap_roll_up():
             "description": "Monthly spending summarized by year",
             "data": roll_up(),
         }
+
     except Exception:
         logger.exception("OLAP roll-up failed")
         raise HTTPException(
@@ -173,9 +265,13 @@ def olap_roll_up():
         )
 
 
+# ---------------------------------------------------------
+# OLAP 2: SLICE
+# ---------------------------------------------------------
+
 @app.get("/api/olap/slice")
 def olap_slice(
-    year: int = Query(default=2026, ge=2000, le=2100),
+    year: int = Query(default=2023, ge=2000, le=2100),
 ):
     try:
         return {
@@ -183,6 +279,7 @@ def olap_slice(
             "description": f"Category spending for {year}",
             "data": slice_data(year=year),
         }
+
     except Exception:
         logger.exception("OLAP slice failed")
         raise HTTPException(
@@ -190,6 +287,10 @@ def olap_slice(
             detail="Could not perform slice analysis.",
         )
 
+
+# ---------------------------------------------------------
+# OLAP 3: DICE
+# ---------------------------------------------------------
 
 @app.get("/api/olap/dice")
 def olap_dice(
@@ -206,13 +307,18 @@ def olap_dice(
     try:
         return {
             "operation": "dice",
-            "description": "Spending filtered by categories and date range",
+            "description": (
+                "Spending filtered by categories and date range"
+            ),
             "data": dice_data(
                 categories=categories,
-                start_date=start_date.isoformat() if start_date else None,
+                start_date=(
+                    start_date.isoformat() if start_date else None
+                ),
                 end_date=end_date.isoformat() if end_date else None,
             ),
         }
+
     except Exception:
         logger.exception("OLAP dice failed")
         raise HTTPException(
@@ -221,14 +327,21 @@ def olap_dice(
         )
 
 
+# ---------------------------------------------------------
+# OLAP 4: PIVOT
+# ---------------------------------------------------------
+
 @app.get("/api/olap/pivot")
 def olap_pivot():
     try:
         return {
             "operation": "pivot",
-            "description": "Monthly spending compared across categories",
+            "description": (
+                "Monthly spending compared across categories"
+            ),
             "data": pivot_data(),
         }
+
     except Exception:
         logger.exception("OLAP pivot failed")
         raise HTTPException(
